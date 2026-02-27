@@ -1,7 +1,13 @@
 -r base.txt
 
 # Production WSGI server
-gunicorn==21.2.0
+gunicorn>=21.2.0
+
+# Database URL parsing
+dj-database-url>=2.1.0
+
+# Static files
+whitenoise>=6.5.0
 
 # Monitoring (optional)
-# sentry-sdk==2.5.0
+# sentry-sdk>=2.5.0
