@@ -10,6 +10,7 @@ from decimal import Decimal
 from .models import Attendance, AnomalyRecord
 from .serializers import AttendanceSerializer, AnomalyRecordSerializer
 from apps.accounts.permissions import IsEmployeeOrAbove, IsSupervisor
+from apps.employees.models import Employee
 
 
 class AttendanceViewSet(viewsets.ModelViewSet):
@@ -29,7 +30,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             try:
                 employee = self.request.user.employee_profile
                 queryset = queryset.filter(employee=employee)
-            except:
+            except AttributeError:
                 queryset = queryset.none()
         
         # Filter by employee
@@ -57,7 +58,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         """上班打卡"""
         try:
             employee = request.user.employee_profile
-        except:
+        except (AttributeError, Employee.DoesNotExist):
             return Response(
                 {'error': 'Employee profile not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -89,7 +90,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         """下班打卡"""
         try:
             employee = request.user.employee_profile
-        except:
+        except (AttributeError, Employee.DoesNotExist):
             return Response(
                 {'error': 'Employee profile not found'},
                 status=status.HTTP_404_NOT_FOUND

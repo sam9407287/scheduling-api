@@ -3,6 +3,7 @@ Schedule models - Dual track (Legal vs Actual)
 """
 from django.db import models
 from django.core.validators import MinValueValidator
+from decimal import Decimal
 
 
 class ScheduleVersion(models.Model):
@@ -107,7 +108,7 @@ class Schedule(models.Model):
     expected_hours = models.DecimalField(
         max_digits=5,
         decimal_places=2,
-        validators=[MinValueValidator(0)],
+        validators=[MinValueValidator(Decimal('0'))],
         verbose_name='預計工時'
     )
     status = models.CharField(

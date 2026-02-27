@@ -3,6 +3,7 @@ Shift Template and Rules models
 """
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
+from decimal import Decimal
 
 
 class ShiftTemplate(models.Model):
@@ -16,14 +17,12 @@ class ShiftTemplate(models.Model):
     name = models.CharField(max_length=100, verbose_name='班別名稱')
     start_time = models.TimeField(verbose_name='開始時間')
     end_time = models.TimeField(verbose_name='結束時間')
-    break_minutes = models.IntegerField(
+    break_minutes = models.PositiveIntegerField(
         default=0,
-        validators=[MinValueValidator(0)],
         verbose_name='休息分鐘數'
     )
-    overlap_minutes = models.IntegerField(
+    overlap_minutes = models.PositiveIntegerField(
         default=30,
-        validators=[MinValueValidator(0)],
         verbose_name='交接重疊分鐘數'
     )
     min_staff_count = models.IntegerField(

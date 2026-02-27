@@ -6,9 +6,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema
 from django.contrib.auth import get_user_model, authenticate
 from .models import Role
-from .serializers import UserSerializer, UserProfileSerializer, RoleSerializer
+from .serializers import (
+    UserSerializer, UserProfileSerializer, RoleSerializer,
+    LoginSerializer, LoginResponseSerializer,
+)
 from .permissions import IsAdmin, IsManager
 
 User = get_user_model()
@@ -18,15 +22,18 @@ class LoginView(APIView):
     """Session/Token login for development & testing"""
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=LoginSerializer,
+        responses={200: LoginResponseSerializer},
+        summary='登入取得 Token',
+        description='使用帳號密碼登入，取得認證 Token（僅用於本地開發/測試）',
+    )
     def post(self, request):
-        username = request.data.get('username')
-        password = request.data.get('password')
+        serializer = LoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        if not username or not password:
-            return Response(
-                {'error': '請提供 username 和 password'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        username = serializer.validated_data['username']
+        password = serializer.validated_data['password']
 
         user = authenticate(request, username=username, password=password)
         if user is None:

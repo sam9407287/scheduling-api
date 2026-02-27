@@ -22,6 +22,7 @@ class Role(models.Model):
     class Meta:
         verbose_name = '角色'
         verbose_name_plural = '角色'
+        ordering = ['name']
 
     def __str__(self):
         return self.get_name_display()

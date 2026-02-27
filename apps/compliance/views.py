@@ -32,22 +32,27 @@ class ComplianceCheckViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
+        # 非管理員只能看自己機構的合規檢查
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(organization=self.request.user.organization)
+
         # Filter by organization
         org_id = self.request.query_params.get('organization')
         if org_id:
             queryset = queryset.filter(organization_id=org_id)
-        
+
         # Filter by check_type
         check_type = self.request.query_params.get('check_type')
         if check_type:
             queryset = queryset.filter(check_type=check_type)
-        
+
         # Filter by status
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
-        
+
         return queryset
     
     @action(detail=False, methods=['post'])

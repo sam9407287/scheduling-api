@@ -31,12 +31,21 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
+        # 員工只能看自己的加班紀錄
+        if not (self.request.user.is_superuser or
+                (self.request.user.role and self.request.user.role.name in ['admin', 'manager', 'supervisor'])):
+            try:
+                employee = self.request.user.employee_profile
+                queryset = queryset.filter(employee=employee)
+            except AttributeError:
+                queryset = queryset.none()
+
         # Filter by employee
         employee_id = self.request.query_params.get('employee')
         if employee_id:
             queryset = queryset.filter(employee_id=employee_id)
-        
+
         # Filter by date range
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
@@ -44,7 +53,7 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(overtime_date__gte=date_from)
         if date_to:
             queryset = queryset.filter(overtime_date__lte=date_to)
-        
+
         return queryset
     
     @action(detail=False, methods=['post'])
@@ -80,10 +89,14 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return []
         
         # 取得對應的排班
+        from apps.schedules.models import Schedule
         schedule = None
         try:
-            schedule = attendance.employee.schedules.get(schedule_date=attendance.work_date)
-        except:
+            schedule = Schedule.objects.filter(
+                employee=attendance.employee,
+                schedule_date=attendance.work_date,
+            ).first()
+        except Schedule.DoesNotExist:
             pass
         
         overtime_records = []

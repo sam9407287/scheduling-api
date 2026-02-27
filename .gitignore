@@ -61,3 +61,4 @@ celerybeat.pid
 
 # Documentation
 docs/_build/
+dev_db.sqlite3

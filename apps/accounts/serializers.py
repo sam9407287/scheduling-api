@@ -17,7 +17,7 @@ class RoleSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     role = RoleSerializer(read_only=True)
     role_id = serializers.IntegerField(write_only=True, required=False)
-    
+
     class Meta:
         model = User
         fields = [
@@ -30,10 +30,10 @@ class UserSerializer(serializers.ModelSerializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """Simplified user profile for current user"""
-    role_name = serializers.CharField(source='role.name', read_only=True)
-    organization_name = serializers.CharField(source='organization.name', read_only=True)
-    branch_name = serializers.CharField(source='branch.name', read_only=True)
-    
+    role_name = serializers.CharField(source='role.name', read_only=True, default=None)
+    organization_name = serializers.CharField(source='organization.name', read_only=True, default=None)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
+
     class Meta:
         model = User
         fields = [
@@ -41,3 +41,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'role_name', 'organization_name', 'branch_name',
             'phone', 'is_active'
         ]
+
+
+class LoginSerializer(serializers.Serializer):
+    """Login request (for local development/testing)"""
+    username = serializers.CharField(help_text='使用者帳號')
+    password = serializers.CharField(help_text='密碼', write_only=True)
+
+
+class LoginResponseSerializer(serializers.Serializer):
+    """Login response"""
+    token = serializers.CharField(help_text='認證 Token')
+    user = UserProfileSerializer()
