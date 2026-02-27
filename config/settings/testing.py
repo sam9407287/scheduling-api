@@ -7,10 +7,11 @@ DEBUG = True
 SECRET_KEY = 'test-secret-key-not-for-production'
 
 # Use SQLite for testing (no PostgreSQL needed)
+import os
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
+        'NAME': os.environ.get('TEST_DB_PATH', ':memory:'),
     }
 }
 
@@ -23,9 +24,10 @@ PASSWORD_HASHERS = [
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
-# Use session auth for testing (no Firebase needed)
+# Use session auth + token auth for testing (no Firebase needed)
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
     ],
@@ -42,5 +44,12 @@ MIDDLEWARE = [m for m in MIDDLEWARE if 'AuditLog' not in m]
 
 ALLOWED_HOSTS = ['*']
 
+# Add authtoken to INSTALLED_APPS for Token auth
+if 'rest_framework.authtoken' not in INSTALLED_APPS:
+    INSTALLED_APPS += ['rest_framework.authtoken']
+
 # Email backend
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+
+# Disable audit signals during testing
+AUDIT_DISABLED = True

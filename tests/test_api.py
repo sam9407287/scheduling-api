@@ -334,19 +334,19 @@ class TestScheduleAPI:
 class TestAttendanceAPI:
     def test_list_attendance(self, admin_api_client):
         """列出出勤紀錄"""
-        response = admin_api_client.get('/api/attendance/attendance/')
+        response = admin_api_client.get('/api/attendance/attendances/')
         assert response.status_code == status.HTTP_200_OK
 
     def test_filter_by_date(self, admin_api_client):
         """依日期過濾出勤"""
         response = admin_api_client.get(
-            '/api/attendance/attendance/?date_from=2024-03-01&date_to=2024-03-31'
+            '/api/attendance/attendances/?date_from=2024-03-01&date_to=2024-03-31'
         )
         assert response.status_code == status.HTTP_200_OK
 
     def test_filter_by_anomaly(self, admin_api_client):
         """過濾異常出勤"""
-        response = admin_api_client.get('/api/attendance/attendance/?anomaly=true')
+        response = admin_api_client.get('/api/attendance/attendances/?anomaly=true')
         assert response.status_code == status.HTTP_200_OK
 
 

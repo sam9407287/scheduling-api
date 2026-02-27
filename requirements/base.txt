@@ -1,27 +1,26 @@
 # Django
-Django==5.0.3
-djangorestframework==3.14.0
-django-cors-headers==4.3.1
+Django>=5.0,<5.1
+djangorestframework>=3.14,<3.16
+django-cors-headers>=4.3,<5.0
 
 # API Documentation
-drf-spectacular==0.27.1
+drf-spectacular>=0.27,<0.28
 
 # Database
-psycopg2-binary==2.9.9
+psycopg2-binary>=2.9,<3.0
 
 # Authentication
-firebase-admin==6.5.0
+firebase-admin>=6.5,<7.0
 
 # Task Queue
-celery==5.3.6
-redis==5.0.1
+celery>=5.3,<6.0
+redis>=5.0,<6.0
 
 # AI Engine
-ortools==9.9.2580
+ortools>=9.9,<10.0
 
 # Utilities
-python-dotenv==1.0.0
-pytz==2024.1
+python-dotenv>=1.0,<2.0
 
 # Validation
-pydantic==2.6.1
+pydantic>=2.6,<3.0

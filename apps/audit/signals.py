@@ -2,13 +2,29 @@
 Audit Log Signals
 """
 import threading
+import sys
+from django.db import connection
 from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.contrib.contenttypes.models import ContentType
-from .models import AuditLog
 
 # Thread-local storage (single instance, not recreated each call)
 _thread_locals = threading.local()
+
+# Global flag to disable audit logging
+_audit_disabled = False
+
+
+def disable_audit():
+    """Disable audit logging (for testing/migrations)"""
+    global _audit_disabled
+    _audit_disabled = True
+
+
+def enable_audit():
+    """Enable audit logging"""
+    global _audit_disabled
+    _audit_disabled = False
 
 
 def get_request():
@@ -21,14 +37,31 @@ def set_request(request):
     _thread_locals.request = request
 
 
-# Models to skip auditing
-SKIP_MODELS = {'audit', 'sessions', 'contenttypes', 'admin'}
+def _should_skip_audit(sender):
+    """Check if audit logging should be skipped"""
+    if _audit_disabled:
+        return True
+
+    # Skip audit's own models and Django internal models
+    skip_labels = {'audit', 'sessions', 'contenttypes', 'admin', 'auth', 'migrations'}
+    if sender._meta.app_label in skip_labels:
+        return True
+
+    # Check if audit table exists
+    try:
+        table_names = connection.introspection.table_names()
+        if 'audit_auditlog' not in table_names:
+            return True
+    except Exception:
+        return True
+
+    return False
 
 
 @receiver(pre_save)
 def audit_pre_save(sender, instance, **kwargs):
     """Store old data before save"""
-    if sender._meta.app_label in SKIP_MODELS:
+    if _should_skip_audit(sender):
         return
 
     if instance.pk:
@@ -44,7 +77,7 @@ def audit_pre_save(sender, instance, **kwargs):
 @receiver(post_save)
 def audit_post_save(sender, instance, created, **kwargs):
     """Log create/update operations"""
-    if sender._meta.app_label in SKIP_MODELS:
+    if _should_skip_audit(sender):
         return
 
     request = get_request()
@@ -74,6 +107,7 @@ def audit_post_save(sender, instance, created, **kwargs):
                 }
 
     try:
+        from .models import AuditLog
         AuditLog.objects.create(
             user=user,
             action=action,
@@ -95,7 +129,7 @@ def audit_post_save(sender, instance, created, **kwargs):
 @receiver(post_delete)
 def audit_post_delete(sender, instance, **kwargs):
     """Log delete operations"""
-    if sender._meta.app_label in SKIP_MODELS:
+    if _should_skip_audit(sender):
         return
 
     request = get_request()
@@ -112,6 +146,7 @@ def audit_post_delete(sender, instance, **kwargs):
     old_data = serialize_model(instance)
 
     try:
+        from .models import AuditLog
         AuditLog.objects.create(
             user=user,
             action='delete',
