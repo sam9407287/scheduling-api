@@ -123,8 +123,30 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 overtime_records.append(record)
         else:
-            # 無排班，可能是休息日或國定假日
-            # TODO: 判斷是否為休息日/國定假日
-            pass
+            # 無排班出勤：依星期判斷加班類型
+            # weekday() 5=週六, 6=週日 視為休息日；週一至週五無排班視為平日延伸
+            if attendance.work_date.weekday() >= 5:
+                overtime_type = 'rest_day'
+                default_multiplier = Decimal('1.34')
+            else:
+                overtime_type = 'regular'
+                default_multiplier = Decimal('1.34')
+
+            rule = OvertimeRule.objects.filter(
+                organization=attendance.employee.organization,
+                overtime_type=overtime_type,
+                is_active=True,
+            ).first()
+            multiplier = rule.multiplier if rule else default_multiplier
+
+            record = OvertimeRecord.objects.create(
+                employee=attendance.employee,
+                attendance=attendance,
+                overtime_date=attendance.work_date,
+                overtime_type=overtime_type,
+                hours=attendance.actual_hours.quantize(Decimal('0.01')),
+                multiplier=multiplier,
+            )
+            overtime_records.append(record)
 
         return overtime_records

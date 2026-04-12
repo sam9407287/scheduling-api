@@ -123,22 +123,97 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def _check_anomalies(self, attendance):
-        """檢查出勤異常"""
+        """檢查出勤異常：超時、遲到、早退、無排班出勤"""
+        from datetime import datetime, timedelta
+        from apps.schedules.models import Schedule
+        from django.utils import timezone as tz_utils
+
         if not attendance.clock_in or not attendance.clock_out:
             return
-        
-        # 檢查超時工作（超過12小時）
+
+        # 將打卡時間轉為本地時間（naive）以便與班別 TimeField 比較
+        local_in = tz_utils.localtime(attendance.clock_in).replace(tzinfo=None)
+        local_out = tz_utils.localtime(attendance.clock_out).replace(tzinfo=None)
+
+        anomaly_reasons = []
+        GRACE_MINUTES = 5  # 5 分鐘寬容
+
+        # --- 超時工作（超過 12 小時）---
         if attendance.actual_hours and attendance.actual_hours > Decimal('12'):
             AnomalyRecord.objects.create(
                 attendance=attendance,
                 anomaly_type='overtime',
                 description=f'工作時數 {attendance.actual_hours} 小時，超過 12 小時',
-                severity='high'
+                severity='high',
             )
+            anomaly_reasons.append('超時工作')
+
+        # 查詢當日排班
+        schedule = (
+            Schedule.objects
+            .filter(employee=attendance.employee, schedule_date=attendance.work_date)
+            .select_related('shift_template')
+            .first()
+        )
+
+        if schedule:
+            shift = schedule.shift_template
+
+            # --- 遲到 ---
+            scheduled_start = datetime.combine(attendance.work_date, shift.start_time)
+            late_threshold = scheduled_start + timedelta(minutes=GRACE_MINUTES)
+            if local_in > late_threshold:
+                late_minutes = int((local_in - scheduled_start).total_seconds() / 60)
+                severity = 'low' if late_minutes <= 15 else ('medium' if late_minutes <= 60 else 'high')
+                AnomalyRecord.objects.create(
+                    attendance=attendance,
+                    anomaly_type='late',
+                    description=(
+                        f'遲到 {late_minutes} 分鐘'
+                        f'（排班開始 {shift.start_time.strftime("%H:%M")}，'
+                        f'實際打卡 {local_in.strftime("%H:%M")}）'
+                    ),
+                    severity=severity,
+                )
+                anomaly_reasons.append('遲到')
+
+            # --- 早退 ---
+            # 夜班（end_time < start_time）結束時間在隔天
+            if shift.end_time > shift.start_time:
+                scheduled_end = datetime.combine(attendance.work_date, shift.end_time)
+            else:
+                scheduled_end = datetime.combine(
+                    attendance.work_date + timedelta(days=1), shift.end_time
+                )
+            early_threshold = scheduled_end - timedelta(minutes=GRACE_MINUTES)
+            if local_out < early_threshold:
+                early_minutes = int((scheduled_end - local_out).total_seconds() / 60)
+                severity = 'low' if early_minutes <= 15 else ('medium' if early_minutes <= 60 else 'high')
+                AnomalyRecord.objects.create(
+                    attendance=attendance,
+                    anomaly_type='early_leave',
+                    description=(
+                        f'早退 {early_minutes} 分鐘'
+                        f'（排班結束 {shift.end_time.strftime("%H:%M")}，'
+                        f'實際打卡 {local_out.strftime("%H:%M")}）'
+                    ),
+                    severity=severity,
+                )
+                anomaly_reasons.append('早退')
+
+        else:
+            # 無排班卻出勤 → mismatch
+            AnomalyRecord.objects.create(
+                attendance=attendance,
+                anomaly_type='mismatch',
+                description=f'員工 {attendance.employee.employee_id} 於 {attendance.work_date} 無排班卻出勤',
+                severity='medium',
+            )
+            anomaly_reasons.append('無排班出勤')
+
+        if anomaly_reasons:
             attendance.anomaly_flag = True
-            attendance.anomaly_reason = '超時工作'
-        
-        # TODO: 檢查其他異常（遲到、早退等）
+            attendance.anomaly_reason = '；'.join(anomaly_reasons)
 
 
 class AnomalyRecordViewSet(viewsets.ModelViewSet):

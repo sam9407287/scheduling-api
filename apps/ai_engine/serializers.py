@@ -22,7 +22,9 @@ class ScheduleRequestSerializer(serializers.Serializer):
     )
     constraints = serializers.JSONField(default=dict)
     preferences = serializers.JSONField(default=dict)
-    
+    # async 是 Python 關鍵字，以 run_async 作為欄位名稱；前端傳 "run_async": true
+    run_async = serializers.BooleanField(default=False)
+
     def validate(self, data):
         if data['period_start'] > data['period_end']:
             raise serializers.ValidationError("period_start must be before period_end")
