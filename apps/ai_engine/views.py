@@ -139,8 +139,39 @@ class AIEngineViewSet(viewsets.ViewSet):
         # 合併呼叫方手動傳入的不可用日期
         manual_unavailability: dict = data.get('constraints', {}).get('employee_unavailability', {})
 
-        employees = [
-            {
+        employees = []
+        for emp in employees_qs:
+            # 可用性設定（blocked/preferred slots + required hours + special_rules）
+            avail_data: dict = {}
+            try:
+                avail = emp.availability
+                avail_data = {
+                    'required_hours_per_week': (
+                        float(avail.required_hours_per_week)
+                        if avail.required_hours_per_week is not None else None
+                    ),
+                    'special_rules': avail.special_rules or '',
+                    'blocked_slots': [
+                        {
+                            'day_of_week': s.day_of_week,
+                            'start_time': s.start_time.strftime('%H:%M'),
+                            'end_time': s.end_time.strftime('%H:%M'),
+                        }
+                        for s in avail.time_slots.filter(slot_type='blocked')
+                    ],
+                    'preferred_slots': [
+                        {
+                            'day_of_week': s.day_of_week,
+                            'start_time': s.start_time.strftime('%H:%M'),
+                            'end_time': s.end_time.strftime('%H:%M'),
+                        }
+                        for s in avail.time_slots.filter(slot_type='preferred')
+                    ],
+                }
+            except Exception:
+                pass  # 員工尚未設定可用性，視為無限制
+
+            employees.append({
                 'id': emp.id,
                 'employee_id': emp.employee_id,
                 'agreed_hours_per_week': float(emp.agreed_hours_per_week),
@@ -149,9 +180,8 @@ class AIEngineViewSet(viewsets.ViewSet):
                     unavailability_map.get(emp.id, [])
                     + manual_unavailability.get(str(emp.id), [])
                 )),
-            }
-            for emp in employees_qs
-        ]
+                'availability': avail_data,
+            })
 
         # 取得班別
         from apps.shifts.models import ShiftTemplate

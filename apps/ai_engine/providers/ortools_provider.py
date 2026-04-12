@@ -399,6 +399,25 @@ class ORToolsProvider(BaseScheduleProvider):
 
         return modified
 
+    @staticmethod
+    def _times_overlap(s1_str: str, e1_str: str, s2_str: str, e2_str: str) -> bool:
+        """
+        判斷兩個時段是否重疊（支援跨午夜，例如 22:00-06:00）。
+        入參為 'HH:MM' 字串。
+        """
+        def to_min(t_str: str) -> int:
+            h, m = map(int, t_str.split(':'))
+            return h * 60 + m
+
+        s1, e1 = to_min(s1_str), to_min(e1_str)
+        s2, e2 = to_min(s2_str), to_min(e2_str)
+
+        # 跨午夜處理（end < start 表示跨過 00:00）
+        if e1 <= s1: e1 += 1440
+        if e2 <= s2: e2 += 1440
+
+        return s1 < e2 and s2 < e1
+
     def _shift_duration_hours(self, shift: Dict[str, Any]) -> float:
         """計算班別工時（小時）"""
         start_str = shift.get('start_time', '00:00')
@@ -471,9 +490,30 @@ class ORToolsProvider(BaseScheduleProvider):
                 emp_id = emp['id']
                 emp_certs = set(emp.get('certifications', []))
                 if not required_certs.issubset(emp_certs):
-                    # 此員工缺乏必要證照，禁止排此班
                     for day_idx in range(num_days):
                         model.Add(assignments[emp_id][day_idx][shift_id] == 0)
+
+        # 5. 員工 blocked 時段：若班別與封鎖時段重疊，禁止排班（硬約束）
+        for emp in employees:
+            emp_id = emp['id']
+            blocked_slots = emp.get('availability', {}).get('blocked_slots', [])
+            if not blocked_slots:
+                continue
+            for day_idx, day in enumerate(days):
+                dow = day.weekday()  # 0=Mon … 6=Sun
+                for shift in shifts:
+                    shift_start = shift.get('start_time', '00:00')
+                    shift_end = shift.get('end_time', '00:00')
+                    for slot in blocked_slots:
+                        slot_dow = slot.get('day_of_week')   # None = 每天
+                        if slot_dow is not None and slot_dow != dow:
+                            continue
+                        if self._times_overlap(
+                            shift_start, shift_end,
+                            slot['start_time'], slot['end_time'],
+                        ):
+                            model.Add(assignments[emp_id][day_idx][shift['id']] == 0)
+                            break  # 已封鎖，不需再判斷其他 slot
 
     def _add_soft_constraints(
         self,
@@ -519,9 +559,8 @@ class ORToolsProvider(BaseScheduleProvider):
         # 公平性權重 10：優先消除班次分配極端不均
         objective_terms.append(10 * disparity)
 
-        # --- 2. 員工班別偏好 ---
+        # --- 2. 員工班別偏好（preferences dict）---
         # preferences 格式：{str(employee_db_id): {str(shift_id): score (0–10)}}
-        # score 越高越偏好；不偏好的排班產生懲罰
         for emp in employees:
             emp_id = emp['id']
             emp_prefs = preferences.get(str(emp_id), {})
@@ -530,10 +569,60 @@ class ORToolsProvider(BaseScheduleProvider):
             for day_idx in range(num_days):
                 for shift in shifts:
                     shift_id = shift['id']
-                    pref_score = int(emp_prefs.get(str(shift_id), 5))  # 預設中性 5
+                    pref_score = int(emp_prefs.get(str(shift_id), 5))
                     penalty = max(0, 10 - pref_score)
                     if penalty > 0:
                         objective_terms.append(penalty * assignments[emp_id][day_idx][shift_id])
+
+        # --- 3. 員工 preferred 時段：排到非偏好班別時加懲罰（軟約束）---
+        for emp in employees:
+            emp_id = emp['id']
+            preferred_slots = emp.get('availability', {}).get('preferred_slots', [])
+            if not preferred_slots:
+                continue
+            for day_idx, day in enumerate(days):
+                dow = day.weekday()
+                for shift in shifts:
+                    shift_start = shift.get('start_time', '00:00')
+                    shift_end = shift.get('end_time', '00:00')
+                    is_preferred = any(
+                        (slot.get('day_of_week') is None or slot.get('day_of_week') == dow)
+                        and self._times_overlap(
+                            shift_start, shift_end,
+                            slot['start_time'], slot['end_time'],
+                        )
+                        for slot in preferred_slots
+                    )
+                    if not is_preferred:
+                        # 排到非偏好時段，懲罰值 3（低於公平性權重 10，確保公平優先）
+                        objective_terms.append(3 * assignments[emp_id][day_idx][shift['id']])
+
+        # --- 4. 員工每週所需工時軟約束 ---
+        # 若 availability.required_hours_per_week 有設定，嘗試滿足
+        # 以週為單位，對每週分配的工時偏差加懲罰
+        if num_days >= 7:
+            for emp in employees:
+                emp_id = emp['id']
+                required_h = emp.get('availability', {}).get('required_hours_per_week')
+                if required_h is None:
+                    continue
+                # 換算為約幾個班次
+                avg_shift_h = (
+                    sum(self._shift_duration_hours(s) for s in shifts) / len(shifts)
+                    if shifts else 8.0
+                )
+                target_shifts_per_week = max(1, int(round(float(required_h) / avg_shift_h)))
+
+                # 以整個排班期間估算目標班次數
+                num_weeks = num_days / 7.0
+                total_target = max(1, int(round(target_shifts_per_week * num_weeks)))
+
+                over = model.NewIntVar(0, max_possible, f'over_req_{emp_id}')
+                under = model.NewIntVar(0, max_possible, f'under_req_{emp_id}')
+                model.Add(shift_counts[emp_id] - total_target <= over)
+                model.Add(total_target - shift_counts[emp_id] <= under)
+                # 低於需求工時懲罰更重（× 5），超過則較輕（× 2）
+                objective_terms.append(5 * under + 2 * over)
 
         return objective_terms
 

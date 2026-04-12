@@ -6,12 +6,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from .models import Employee, Contract, Certification
+from .models import Employee, Contract, Certification, EmployeeAvailability
 from .serializers import (
     EmployeeSerializer,
     EmployeeListSerializer,
     ContractSerializer,
-    CertificationSerializer
+    CertificationSerializer,
+    EmployeeAvailabilitySerializer,
+    EmployeeTimeSlotSerializer,
 )
 from apps.accounts.permissions import IsManager, IsSupervisor
 
@@ -149,6 +151,72 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
     
+    @action(detail=True, methods=['get', 'put', 'patch'])
+    def availability(self, request, pk=None):
+        """
+        取得或更新員工可用性設定（含所有 time_slots）。
+
+        GET  → 回傳現有設定（若尚未建立回傳 204）
+        PUT  → 完整建立或替換（time_slots 整批替換）
+        PATCH → 部分更新（time_slots 若有傳入則整批替換，未傳入則不動）
+        """
+        employee = self.get_object()
+
+        if request.method == 'GET':
+            try:
+                avail = employee.availability
+            except EmployeeAvailability.DoesNotExist:
+                return Response(
+                    {'detail': 'No availability config yet. Use PUT to create one.'},
+                    status=status.HTTP_204_NO_CONTENT,
+                )
+            return Response(EmployeeAvailabilitySerializer(avail).data)
+
+        # PUT / PATCH
+        try:
+            avail = employee.availability
+            partial = (request.method == 'PATCH')
+            serializer = EmployeeAvailabilitySerializer(avail, data=request.data, partial=partial)
+        except EmployeeAvailability.DoesNotExist:
+            # 尚未建立，自動建立
+            serializer = EmployeeAvailabilitySerializer(
+                data={**request.data, 'employee': employee.id}
+            )
+
+        if serializer.is_valid():
+            serializer.save(employee=employee)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='availability/time_slots')
+    def add_time_slot(self, request, pk=None):
+        """
+        對指定員工新增單一 time_slot（不替換現有）。
+        適合前端「新增一筆時段」按鈕。
+        """
+        employee = self.get_object()
+        avail, _ = EmployeeAvailability.objects.get_or_create(employee=employee)
+        serializer = EmployeeTimeSlotSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(availability=avail)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(
+        detail=True,
+        methods=['delete'],
+        url_path=r'availability/time_slots/(?P<slot_id>\d+)',
+    )
+    def remove_time_slot(self, request, pk=None, slot_id=None):
+        """刪除指定員工的單一 time_slot。"""
+        employee = self.get_object()
+        try:
+            slot = employee.availability.time_slots.get(id=slot_id)
+        except (EmployeeAvailability.DoesNotExist, Exception):
+            return Response({'error': 'Time slot not found'}, status=status.HTTP_404_NOT_FOUND)
+        slot.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=['delete'])
     def remove_certification(self, request, pk=None):
         """Remove certification from employee"""
