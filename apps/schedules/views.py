@@ -119,7 +119,11 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         for key in schedules1.keys() & schedules2.keys():
             s1 = schedules1[key]
             s2 = schedules2[key]
-            if s1.employee_id != s2.employee_id or s1.shift_template_id != s2.shift_template_id:
+            # key 已包含 employee_id / schedule_date / shift_template_id，
+            # 故只需比對可能變動的欄位：expected_hours、status、notes
+            if (s1.expected_hours != s2.expected_hours
+                    or s1.status != s2.status
+                    or s1.notes != s2.notes):
                 differences.append({
                     'key': key,
                     'version1': ScheduleSerializer(s1).data,

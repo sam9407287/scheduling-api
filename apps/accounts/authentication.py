@@ -7,6 +7,7 @@ import firebase_admin
 from firebase_admin import credentials, auth
 from rest_framework import authentication, exceptions
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
 User = get_user_model()
 
@@ -73,13 +74,23 @@ class FirebaseAuthentication(authentication.BaseAuthentication):
             # Create user if doesn't exist
             email = decoded_token.get('email', '')
             name = decoded_token.get('name', '')
-            
-            user = User.objects.create_user(
-                username=email or firebase_uid,
-                email=email,
-                firebase_uid=firebase_uid,
-                first_name=name.split()[0] if name else '',
-                last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
-            )
-        
+            name_parts = name.split() if name else []
+
+            # username 必須唯一；優先使用 firebase_uid 以避免 email 衝突
+            username = firebase_uid
+            try:
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    firebase_uid=firebase_uid,
+                    first_name=name_parts[0] if name_parts else '',
+                    last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                )
+            except IntegrityError:
+                # 極罕見：並發建立同一 firebase_uid，直接取已存在的 user
+                try:
+                    user = User.objects.get(firebase_uid=firebase_uid)
+                except User.DoesNotExist:
+                    raise exceptions.AuthenticationFailed('Unable to create or retrieve user.')
+
         return (user, None)

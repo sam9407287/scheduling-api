@@ -1,9 +1,12 @@
 """
 Audit Log Signals
 """
+import logging
 import threading
 import sys
 from django.db import connection
+
+logger = logging.getLogger(__name__)
 from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.contrib.contenttypes.models import ContentType
@@ -121,9 +124,9 @@ def audit_post_save(sender, instance, created, **kwargs):
             ip_address=ip_address,
             user_agent=user_agent,
         )
-    except Exception:
+    except Exception as e:
         # Don't let audit logging failures break the application
-        pass
+        logger.error('Audit post_save failed for %s pk=%s: %s', sender.__name__, instance.pk, e, exc_info=True)
 
 
 @receiver(post_delete)
@@ -158,8 +161,8 @@ def audit_post_delete(sender, instance, **kwargs):
             ip_address=ip_address,
             user_agent=user_agent,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error('Audit post_delete failed for %s pk=%s: %s', sender.__name__, instance.pk, e, exc_info=True)
 
 
 def serialize_model(instance):

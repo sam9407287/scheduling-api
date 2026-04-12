@@ -1,7 +1,7 @@
 """
 Labor Law Compliance Engine
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import List, Dict, Any
 from django.db.models import Sum, Q
@@ -226,42 +226,34 @@ class ComplianceEngine:
     def _check_rest_interval(
         self,
         schedules: List[Schedule],
-        min_rest_hours: int
+        min_rest_hours: float
     ) -> List[Dict[str, Any]]:
         """檢查兩班之間休息間隔"""
         violations = []
-        
+
         if len(schedules) < 2:
             return violations
-        
+
         sorted_schedules = sorted(schedules, key=lambda s: (s.schedule_date, s.shift_template.start_time))
-        
+
         for i in range(len(sorted_schedules) - 1):
             current = sorted_schedules[i]
             next_schedule = sorted_schedules[i + 1]
-            
-            # 計算休息時間
-            current_end = current.shift_template.end_time
-            next_start = next_schedule.shift_template.start_time
-            
-            # 如果跨天，需要特殊處理
-            if next_schedule.schedule_date > current.schedule_date:
-                # 跨天情況
-                rest_hours = 24 - current_end.hour + next_start.hour
-            else:
-                # 同一天
-                rest_hours = (next_start.hour * 60 + next_start.minute - 
-                            current_end.hour * 60 - current_end.minute) / 60
-            
+
+            # 以 datetime 計算休息時間，避免跨日與分鐘截斷問題
+            current_end_dt = datetime.combine(current.schedule_date, current.shift_template.end_time)
+            next_start_dt = datetime.combine(next_schedule.schedule_date, next_schedule.shift_template.start_time)
+            rest_hours = (next_start_dt - current_end_dt).total_seconds() / 3600
+
             if rest_hours < min_rest_hours:
                 violations.append({
                     'type': 'rest_interval_violation',
                     'employee_id': current.employee.employee_id,
                     'date1': current.schedule_date.isoformat(),
                     'date2': next_schedule.schedule_date.isoformat(),
-                    'rest_hours': rest_hours,
+                    'rest_hours': round(rest_hours, 2),
                     'min_rest_hours': min_rest_hours,
-                    'message': f'兩班之間休息時間 {rest_hours} 小時，低於限制 {min_rest_hours} 小時'
+                    'message': f'兩班之間休息時間 {round(rest_hours, 2)} 小時，低於限制 {min_rest_hours} 小時'
                 })
         
         return violations
