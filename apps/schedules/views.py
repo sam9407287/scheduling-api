@@ -46,13 +46,27 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """簽核排班版本"""
-        version = self.get_object()
-        version.status = 'approved'
-        version.approved_by = request.user
         from django.utils import timezone
-        version.approved_at = timezone.now()
-        version.save()
-        
+
+        version = self.get_object()
+
+        # 使用原子性 update，只在 status=draft 時才更新，避免並發重複簽核
+        updated = ScheduleVersion.objects.filter(
+            pk=version.pk,
+            status='draft'
+        ).update(
+            status='approved',
+            approved_by=request.user,
+            approved_at=timezone.now()
+        )
+
+        if not updated:
+            return Response(
+                {'error': 'Only draft versions can be approved, or it was already approved.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        version.refresh_from_db()
         serializer = self.get_serializer(version)
         return Response(serializer.data)
     

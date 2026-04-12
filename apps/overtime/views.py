@@ -82,54 +82,49 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
     
     def _calculate_overtime(self, attendance: Attendance) -> list:
         """計算加班時數"""
-        from datetime import datetime, time
         from decimal import Decimal
-        
+
         if not attendance.actual_hours:
             return []
-        
-        # 取得對應的排班
+
+        # 取得對應的排班（filter().first() 不會拋 DoesNotExist，不需 try/except）
         from apps.schedules.models import Schedule
-        schedule = None
-        try:
-            schedule = Schedule.objects.filter(
-                employee=attendance.employee,
-                schedule_date=attendance.work_date,
-            ).first()
-        except Schedule.DoesNotExist:
-            pass
-        
+        schedule = Schedule.objects.filter(
+            employee=attendance.employee,
+            schedule_date=attendance.work_date,
+        ).first()
+
         overtime_records = []
-        
+
         if schedule:
-            # 有排班，計算超出排班時數的部分
-            expected_hours = float(schedule.expected_hours)
-            actual_hours = float(attendance.actual_hours)
-            
+            # 使用 Decimal 計算，避免浮點精度誤差影響薪資
+            actual_hours = attendance.actual_hours          # 已是 Decimal
+            expected_hours = schedule.expected_hours        # 已是 Decimal
+
             if actual_hours > expected_hours:
                 overtime_hours = actual_hours - expected_hours
-                
+
                 # 取得加班規則
                 rule = OvertimeRule.objects.filter(
                     organization=attendance.employee.organization,
                     overtime_type='regular',
                     is_active=True
                 ).first()
-                
-                multiplier = float(rule.multiplier) if rule else 1.34
-                
+
+                multiplier = rule.multiplier if rule else Decimal('1.34')
+
                 record = OvertimeRecord.objects.create(
                     employee=attendance.employee,
                     attendance=attendance,
                     overtime_date=attendance.work_date,
                     overtime_type='regular',
-                    hours=Decimal(str(round(overtime_hours, 2))),
-                    multiplier=Decimal(str(multiplier)),
+                    hours=overtime_hours.quantize(Decimal('0.01')),
+                    multiplier=multiplier,
                 )
                 overtime_records.append(record)
         else:
             # 無排班，可能是休息日或國定假日
             # TODO: 判斷是否為休息日/國定假日
             pass
-        
+
         return overtime_records

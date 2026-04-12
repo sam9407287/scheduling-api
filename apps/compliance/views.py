@@ -64,7 +64,7 @@ class ComplianceCheckViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'schedule_version_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             schedule_version = ScheduleVersion.objects.get(id=schedule_version_id)
         except ScheduleVersion.DoesNotExist:
@@ -72,34 +72,50 @@ class ComplianceCheckViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'Schedule version not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
+        # 非 superuser 只能檢查自己機構的排班版本
+        if not request.user.is_superuser:
+            if schedule_version.organization != request.user.organization:
+                return Response(
+                    {'error': 'You do not have permission to check this organization\'s schedule'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         engine = ComplianceEngine()
         compliance_check = engine.check_schedule_compliance(schedule_version)
-        
+
         serializer = ComplianceCheckSerializer(compliance_check)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
-    
+
     @action(detail=False, methods=['post'])
     def check_attendance(self, request):
         """檢查出勤合規性"""
         organization_id = request.data.get('organization_id')
         period_start = request.data.get('period_start')
         period_end = request.data.get('period_end')
-        
+
         if not all([organization_id, period_start, period_end]):
             return Response(
                 {'error': 'organization_id, period_start, and period_end are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        # 非 superuser 只能檢查自己機構
+        if not request.user.is_superuser:
+            if str(request.user.organization_id) != str(organization_id):
+                return Response(
+                    {'error': 'You do not have permission to check this organization\'s attendance'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         from datetime import datetime
         period_start = datetime.fromisoformat(period_start).date() if isinstance(period_start, str) else period_start
         period_end = datetime.fromisoformat(period_end).date() if isinstance(period_end, str) else period_end
-        
+
         engine = ComplianceEngine()
         compliance_check = engine.check_attendance_compliance(
             organization_id, period_start, period_end
         )
-        
+
         serializer = ComplianceCheckSerializer(compliance_check)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
