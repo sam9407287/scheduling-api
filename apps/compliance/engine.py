@@ -242,6 +242,9 @@ class ComplianceEngine:
 
             # 以 datetime 計算休息時間，避免跨日與分鐘截斷問題
             current_end_dt = datetime.combine(current.schedule_date, current.shift_template.end_time)
+            # 跨午夜班別：end_time < start_time 表示結束在下一個日曆日
+            if current.shift_template.end_time < current.shift_template.start_time:
+                current_end_dt += timedelta(days=1)
             next_start_dt = datetime.combine(next_schedule.schedule_date, next_schedule.shift_template.start_time)
             rest_hours = (next_start_dt - current_end_dt).total_seconds() / 3600
 

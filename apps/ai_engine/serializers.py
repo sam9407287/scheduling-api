@@ -35,7 +35,15 @@ class ScheduleResultSerializer(serializers.Serializer):
     """排班結果序列化器"""
     success = serializers.BooleanField()
     assignments = serializers.ListField()
-    score = serializers.FloatField()
+    score = serializers.SerializerMethodField()
     violations = serializers.ListField()
     metadata = serializers.DictField()
     message = serializers.CharField(required=False, allow_null=True)
+
+    def get_score(self, obj):
+        import math
+        # obj may be a dataclass or a dict
+        s = obj.score if hasattr(obj, 'score') else obj.get('score')
+        if s is None or (isinstance(s, float) and not math.isfinite(s)):
+            return None
+        return s
