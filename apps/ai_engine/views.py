@@ -187,7 +187,7 @@ class AIEngineViewSet(viewsets.ViewSet):
         from apps.shifts.models import ShiftTemplate
         shifts_qs = ShiftTemplate.objects.filter(
             organization_id=org_id, is_active=True
-        ).prefetch_related('required_certifications')
+        ).prefetch_related('required_certifications', 'employee_priorities')
         if data.get('shift_template_ids'):
             shifts_qs = shifts_qs.filter(id__in=data['shift_template_ids'])
 
@@ -200,6 +200,14 @@ class AIEngineViewSet(viewsets.ViewSet):
                 'break_minutes': shift.break_minutes,
                 'min_staff_count': shift.min_staff_count,
                 'required_certifications': [c.id for c in shift.required_certifications.all()],
+                'employee_priorities': [
+                    {
+                        'employee_id': p.employee_id,
+                        'priority_rank': p.priority_rank,
+                        'max_extra_shifts': p.max_extra_shifts,
+                    }
+                    for p in shift.employee_priorities.all()
+                ],
             }
             for shift in shifts_qs
         ]

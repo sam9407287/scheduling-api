@@ -91,3 +91,37 @@ class ShiftRule(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.get_rule_type_display()})"
+
+
+class ShiftEmployeePriority(models.Model):
+    """班別員工優先順序（用於超時加班意願分配）"""
+    shift_template = models.ForeignKey(
+        ShiftTemplate,
+        on_delete=models.CASCADE,
+        related_name='employee_priorities',
+        verbose_name='班別',
+    )
+    employee = models.ForeignKey(
+        'employees.Employee',
+        on_delete=models.CASCADE,
+        related_name='shift_priorities',
+        verbose_name='員工',
+    )
+    priority_rank = models.PositiveIntegerField(
+        verbose_name='優先排序（1 = 最優先）',
+        validators=[MinValueValidator(1)],
+    )
+    max_extra_shifts = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='最大額外班次（null = 不限）',
+    )
+
+    class Meta:
+        verbose_name = '班別員工優先順序'
+        verbose_name_plural = '班別員工優先順序'
+        unique_together = [['shift_template', 'employee']]
+        ordering = ['shift_template', 'priority_rank']
+
+    def __str__(self):
+        return f"{self.shift_template.name} - 第{self.priority_rank}順位 - {self.employee}"

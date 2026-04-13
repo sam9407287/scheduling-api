@@ -433,6 +433,93 @@ POST /ai/evaluate_change/
 
 ---
 
+## 6. 班別員工優先順序（新功能）
+
+### 6-1. 功能說明
+
+每個班別可設定一份「員工優先排序清單」，用於超時人力分配：
+
+- **priority_rank**：1 = 最優先，數字越大優先度越低
+- **max_extra_shifts**：該員工在此班別的最大班次上限（null = 不限）
+- 沒有設定優先清單的班別不受影響，AI 依一般公平分配邏輯排班
+- 有設定清單時，AI 會優先將班次分配給清單內排序靠前的員工；非清單員工仍可被排入，但權重較低（軟約束）
+
+### 6-2. TypeScript 型別定義
+
+```typescript
+// src/types/shift.ts 新增
+
+export interface ShiftEmployeePriority {
+  id: number
+  employee: number
+  employee_name: string
+  priority_rank: number        // 1 = 最優先
+  max_extra_shifts: number | null
+}
+```
+
+### 6-3. API Endpoints
+
+#### 取得班別員工優先順序
+
+```
+GET /shifts/{id}/employee_priorities/
+```
+
+**Response 200：**
+```json
+[
+  { "id": 1, "employee": 42, "employee_name": "王小明", "priority_rank": 1, "max_extra_shifts": 3 },
+  { "id": 2, "employee": 43, "employee_name": "李大華", "priority_rank": 2, "max_extra_shifts": null }
+]
+```
+
+#### 整批替換優先順序
+
+```
+PUT /shifts/{id}/employee_priorities/
+```
+
+> **PUT 會整批替換**，傳入空陣列 `[]` 即清除全部設定。
+
+**Request Body：**
+```json
+[
+  { "employee": 42, "priority_rank": 1, "max_extra_shifts": 3 },
+  { "employee": 43, "priority_rank": 2, "max_extra_shifts": null }
+]
+```
+
+**Response 200：** 替換後的完整清單
+
+### 6-4. 前端 UI 建議
+
+**班別設定頁 - 員工優先順序區塊：**
+
+```
+┌──────────────────────────────────────────────────────┐
+│ 員工優先順序（加班/超時分配）           [+ 新增]      │
+├──────────────────────────────────────────────────────┤
+│ ┌────┬──────────────┬──────────┬──────────────────┐  │
+│ │ 排序│ 員工         │ 最大班次 │                  │  │
+│ │  1  │ 王小明 ▼    │ [3]      │ ↑ ↓  [刪]       │  │
+│ │  2  │ 李大華 ▼    │ [ ]不限  │ ↑ ↓  [刪]       │  │
+│ └────┴──────────────┴──────────┴──────────────────┘  │
+│  （留空表示無優先清單，AI 依一般公平分配）             │
+├──────────────────────────────────────────────────────┤
+│                                    [儲存優先順序]     │
+└──────────────────────────────────────────────────────┘
+```
+
+**操作邏輯：**
+- 頁面載入時 `GET /shifts/{id}/employee_priorities/`
+- 「+ 新增」新增一列到本地 state，選取員工後設定 priority_rank
+- 「↑ ↓」按鈕重新排列本地 state 的 priority_rank 順序
+- 「儲存優先順序」呼叫 `PUT` 送出完整清單（整批替換）
+- `max_extra_shifts` 留空欄位應送出 `null`
+
+---
+
 ## 變更摘要
 
 | 影響範圍 | 前端調整必要性 | 說明 |
@@ -443,3 +530,4 @@ POST /ai/evaluate_change/
 | **員工可用性 API** | **高（新功能）** | 員工表單新增 availability 區塊 |
 | AI `async` → `run_async` | **高** | 參數名稱必須改 |
 | AI optimize / check_compliance / evaluate_change | **中（新功能）** | 可串接進排班流程 |
+| **班別員工優先順序** | **高（新功能）** | 班別設定頁新增優先順序區塊 |

@@ -597,7 +597,52 @@ class ORToolsProvider(BaseScheduleProvider):
                         # 排到非偏好時段，懲罰值 3（低於公平性權重 10，確保公平優先）
                         objective_terms.append(3 * assignments[emp_id][day_idx][shift['id']])
 
-        # --- 4. 員工每週所需工時軟約束 ---
+        # --- 4. 班別員工優先順序（超時加班意願）---
+        # 每個班別可設定優先順序清單；排入優先順序外的員工加懲罰。
+        # rank → OR-Tools weight: 1→10, 2→7, 3→4, 4→2, 5+→1, 不在清單→0
+        RANK_WEIGHT = {1: 10, 2: 7, 3: 4, 4: 2}
+
+        for shift in shifts:
+            shift_id = shift['id']
+            priority_list = shift.get('employee_priorities', [])
+            if not priority_list:
+                continue
+
+            priority_map: Dict[int, int] = {}
+            for p in priority_list:
+                rank = p.get('priority_rank', 99)
+                priority_map[p['employee_id']] = RANK_WEIGHT.get(rank, 1) if rank <= 4 else 1
+
+            for emp in employees:
+                emp_id = emp['id']
+                emp_weight = priority_map.get(emp_id, 0)
+                # 不在清單 weight=0，懲罰最大；排名越高懲罰越小
+                penalty = 10 - emp_weight
+                if penalty <= 0:
+                    continue
+                for day_idx in range(num_days):
+                    objective_terms.append(penalty * assignments[emp_id][day_idx][shift_id])
+
+            # max_extra_shifts 上限（軟約束，重罰阻止超出）
+            for p in priority_list:
+                max_extra = p.get('max_extra_shifts')
+                if max_extra is None:
+                    continue
+                emp_id = p['employee_id']
+                if not any(e['id'] == emp_id for e in employees):
+                    continue
+                total_on_shift = model.NewIntVar(0, num_days, f'tot_s{shift_id}_e{emp_id}')
+                model.Add(
+                    total_on_shift == sum(
+                        assignments[emp_id][day_idx][shift_id]
+                        for day_idx in range(num_days)
+                    )
+                )
+                over_cap = model.NewIntVar(0, num_days, f'ocap_s{shift_id}_e{emp_id}')
+                model.Add(over_cap >= total_on_shift - max_extra)
+                objective_terms.append(20 * over_cap)
+
+        # --- 5. 員工每週所需工時軟約束 ---
         # 若 availability.required_hours_per_week 有設定，嘗試滿足
         # 以週為單位，對每週分配的工時偏差加懲罰
         if num_days >= 7:

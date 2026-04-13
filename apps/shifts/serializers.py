@@ -2,7 +2,7 @@
 Shift serializers
 """
 from rest_framework import serializers
-from .models import ShiftTemplate, ShiftRule
+from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority
 from apps.employees.models import Certification
 from apps.employees.serializers import CertificationSerializer
 
@@ -18,6 +18,15 @@ class ShiftRuleSerializer(serializers.ModelSerializer):
             'rule_type_display', 'value', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ShiftEmployeePrioritySerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.user.get_full_name', read_only=True)
+
+    class Meta:
+        model = ShiftEmployeePriority
+        fields = ['id', 'employee', 'employee_name', 'priority_rank', 'max_extra_shifts']
+        read_only_fields = ['id']
 
 
 class ShiftTemplateSerializer(serializers.ModelSerializer):

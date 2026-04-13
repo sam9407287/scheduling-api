@@ -1,10 +1,13 @@
 """
 Shift views
 """
-from rest_framework import viewsets
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db import transaction
 from django.db.models import Q
-from .models import ShiftTemplate, ShiftRule
-from .serializers import ShiftTemplateSerializer, ShiftRuleSerializer
+from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority
+from .serializers import ShiftTemplateSerializer, ShiftRuleSerializer, ShiftEmployeePrioritySerializer
 from apps.accounts.permissions import IsManager, IsSupervisor
 
 
@@ -33,8 +36,36 @@ class ShiftTemplateViewSet(viewsets.ModelViewSet):
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
-        
+
         return queryset
+
+    @action(detail=True, methods=['get', 'put'])
+    def employee_priorities(self, request, pk=None):
+        """
+        取得或整批替換班別的員工優先順序清單。
+
+        GET → 回傳排序清單
+        PUT → 整批替換（先刪除舊的，再建立新的）
+              傳入格式：[{"employee": <id>, "priority_rank": 1, "max_extra_shifts": null}, ...]
+        """
+        shift = self.get_object()
+
+        if request.method == 'GET':
+            priorities = shift.employee_priorities.select_related('employee__user').all()
+            return Response(ShiftEmployeePrioritySerializer(priorities, many=True).data)
+
+        # PUT — bulk replace
+        serializer = ShiftEmployeePrioritySerializer(data=request.data, many=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            shift.employee_priorities.all().delete()
+            for item in serializer.validated_data:
+                ShiftEmployeePriority.objects.create(shift_template=shift, **item)
+
+        priorities = shift.employee_priorities.select_related('employee__user').all()
+        return Response(ShiftEmployeePrioritySerializer(priorities, many=True).data)
 
 
 class ShiftRuleViewSet(viewsets.ModelViewSet):
