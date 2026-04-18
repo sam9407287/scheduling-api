@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r requirements/production.txt
 COPY . /app/
 
 # Collect static files
-RUN SECRET_KEY=build-placeholder python manage.py collectstatic --noinput || true
+RUN SECRET_KEY=build-placeholder ALLOWED_HOSTS=localhost python manage.py collectstatic --noinput
 
 # Expose port (Railway/GCP will set PORT env var)
 EXPOSE ${PORT:-8000}

@@ -4,12 +4,19 @@ Production settings
 import os
 import dj_database_url
 from .base import *
+from ._validators import require_secret_key, require_allowed_hosts
 
 DEBUG = False
 
-# Allow Railway domain
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
-CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if os.getenv('CSRF_TRUSTED_ORIGINS') else []
+# Fail fast if critical env vars are missing or insecure
+SECRET_KEY = require_secret_key()
+ALLOWED_HOSTS = require_allowed_hosts()
+
+CSRF_TRUSTED_ORIGINS = (
+    [o.strip() for o in os.environ['CSRF_TRUSTED_ORIGINS'].split(',') if o.strip()]
+    if os.environ.get('CSRF_TRUSTED_ORIGINS')
+    else []
+)
 
 # Security settings
 SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', '1') == '1'
@@ -33,8 +40,10 @@ if os.getenv('DATABASE_URL'):
 MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# REST Framework - add Token Auth for production (alongside Firebase)
+# Authentication: Firebase is primary; Token + Session preserved for admin/service use.
+# NOTE: The original code replaced this list entirely, dropping FirebaseAuthentication. Fixed.
 REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'] = [
+    'apps.accounts.authentication.FirebaseAuthentication',
     'rest_framework.authentication.TokenAuthentication',
     'rest_framework.authentication.SessionAuthentication',
 ]
