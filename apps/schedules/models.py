@@ -64,6 +64,15 @@ class ScheduleVersion(models.Model):
         related_name='created_schedules',
         verbose_name='建立人'
     )
+    derived_from = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='derived_versions',
+        verbose_name='派生來源版本',
+        help_text='A 班表（legal）通常派生自 B 班表（actual）；保留歷史可重新派生'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

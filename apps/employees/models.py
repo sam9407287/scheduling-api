@@ -23,12 +23,46 @@ class Certification(models.Model):
         return self.name
 
 
+class EmployeeTag(models.Model):
+    """員工自訂標籤（組織內共用，例：can_lift_high、driver、bilingual）"""
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='employee_tags',
+        verbose_name='所屬機構',
+    )
+    code = models.CharField(max_length=64, verbose_name='標籤代碼')
+    label = models.CharField(max_length=100, verbose_name='顯示名稱')
+    description = models.TextField(blank=True, verbose_name='描述')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = '員工標籤'
+        verbose_name_plural = '員工標籤'
+        unique_together = [['organization', 'code']]
+        ordering = ['organization', 'code']
+
+    def __str__(self):
+        return f"{self.code} ({self.label})"
+
+
 class Employee(models.Model):
     """員工"""
     CONTRACT_TYPE_CHOICES = [
         ('full_time', '全職'),
         ('part_time', '兼職'),
         ('dispatch', '派遣'),
+    ]
+    GENDER_CHOICES = [
+        ('male', '男'),
+        ('female', '女'),
+        ('other', '其他'),
+        ('undisclosed', '不公開'),
+    ]
+    SHIFT_PATTERN_CHOICES = [
+        ('none', '無偏好'),
+        ('alternating', '花花班（早晚交錯）'),
+        ('consecutive', '連上放長假'),
     ]
 
     user = models.OneToOneField(
@@ -76,10 +110,56 @@ class Employee(models.Model):
         related_name='employees',
         verbose_name='持有證照'
     )
+    tags = models.ManyToManyField(
+        EmployeeTag,
+        blank=True,
+        related_name='employees',
+        verbose_name='員工標籤',
+    )
+    # --- 個資欄位（需透過 EmployeeDataConsent 授權才能用於 OR-Tools 排班）---
+    gender = models.CharField(
+        max_length=20,
+        choices=GENDER_CHOICES,
+        blank=True,
+        default='',
+        verbose_name='性別',
+    )
+    birth_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='生日',
+        help_text='用於推算年齡；OR-Tools 需引用時改取派生年齡',
+    )
+    height_cm = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal('50.00')), MaxValueValidator(Decimal('250.00'))],
+        verbose_name='身高（公分）',
+    )
+    weight_kg = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal('20.00')), MaxValueValidator(Decimal('400.00'))],
+        verbose_name='體重（公斤）',
+    )
+    shift_pattern_preference = models.CharField(
+        max_length=20,
+        choices=SHIFT_PATTERN_CHOICES,
+        default='none',
+        verbose_name='排班模式偏好',
+    )
+    # --- 個資欄位結束 ---
     hire_date = models.DateField(verbose_name='到職日期')
     is_active = models.BooleanField(default=True, verbose_name='在職')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # 列入「敏感」欄位：未取得 EmployeeDataConsent 時，OR-Tools 不可讀取
+    SENSITIVE_FIELDS = ('gender', 'birth_date', 'height_cm', 'weight_kg')
 
     class Meta:
         verbose_name = '員工'
@@ -88,6 +168,62 @@ class Employee(models.Model):
 
     def __str__(self):
         return f"{self.employee_id} - {self.user.get_full_name() or self.user.username}"
+
+    def has_active_data_consent(self) -> bool:
+        """員工是否有有效的個資使用授權（用於 OR-Tools 排班）。"""
+        consent = getattr(self, 'data_consent', None)
+        if consent is None:
+            return False
+        return consent.is_active()
+
+    def sensitive_attributes_for_solver(self) -> dict:
+        """
+        提供給 OR-Tools 使用的敏感欄位 dict。
+        未授權員工一律回傳 None，這是團隊規則 generator 的單一信任邊界。
+        """
+        if not self.has_active_data_consent():
+            return {field: None for field in self.SENSITIVE_FIELDS}
+        return {field: getattr(self, field) or None for field in self.SENSITIVE_FIELDS}
+
+
+class EmployeeDataConsent(models.Model):
+    """
+    員工敏感資料使用同意紀錄（首次進入排班時彈窗確認）。
+
+    Invariants:
+      - 一名員工最多一筆紀錄（OneToOne）。
+      - `revoked_at` 為 None 視為授權中。
+      - `consent_version` 用於未來條款更新時重新請求。
+    """
+    employee = models.OneToOneField(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='data_consent',
+        verbose_name='員工',
+    )
+    consented_at = models.DateTimeField(verbose_name='同意時間')
+    revoked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='撤回時間（None = 仍有效）',
+    )
+    consent_version = models.CharField(
+        max_length=20,
+        default='1.0',
+        verbose_name='同意書版本',
+    )
+    notes = models.TextField(blank=True, verbose_name='備註')
+
+    class Meta:
+        verbose_name = '員工個資同意'
+        verbose_name_plural = '員工個資同意'
+
+    def __str__(self):
+        status = '撤回' if self.revoked_at else '有效'
+        return f"{self.employee.employee_id} consent v{self.consent_version} ({status})"
+
+    def is_active(self) -> bool:
+        return self.revoked_at is None
 
 
 class EmployeeAvailability(models.Model):
