@@ -2,8 +2,38 @@
 Employee serializers
 """
 from rest_framework import serializers
-from .models import Employee, Contract, Certification, EmployeeAvailability, EmployeeTimeSlot
+from .models import (
+    Employee, Contract, Certification, EmployeeAvailability, EmployeeTimeSlot,
+    EmployeeTag, EmployeeDataConsent,
+)
 from apps.accounts.serializers import UserSerializer
+
+
+class EmployeeDataConsentSerializer(serializers.ModelSerializer):
+    """員工個資使用同意紀錄。
+
+    revoked_at 為 None 表示授權中。`is_active` 是計算欄位，前端可直接判斷
+    是否需要彈出同意書。POST 不接受 revoked_at（撤回走 DELETE）。
+    """
+    is_active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmployeeDataConsent
+        fields = [
+            'id', 'employee', 'consented_at', 'revoked_at',
+            'consent_version', 'notes', 'is_active',
+        ]
+        read_only_fields = ['id', 'employee', 'consented_at', 'revoked_at', 'is_active']
+
+    def get_is_active(self, obj) -> bool:
+        return obj.is_active()
+
+
+class EmployeeTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmployeeTag
+        fields = ['id', 'organization', 'code', 'label', 'description', 'created_at']
+        read_only_fields = ['id', 'created_at']
 
 
 class CertificationSerializer(serializers.ModelSerializer):

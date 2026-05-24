@@ -6,7 +6,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from .models import Employee, Contract, Certification, EmployeeAvailability
+from django.utils import timezone
+from .models import (
+    Employee, Contract, Certification, EmployeeAvailability,
+    EmployeeDataConsent, EmployeeTag,
+)
 from .serializers import (
     EmployeeSerializer,
     EmployeeListSerializer,
@@ -14,6 +18,8 @@ from .serializers import (
     CertificationSerializer,
     EmployeeAvailabilitySerializer,
     EmployeeTimeSlotSerializer,
+    EmployeeDataConsentSerializer,
+    EmployeeTagSerializer,
 )
 from apps.accounts.permissions import IsManager, IsSupervisor
 
@@ -53,7 +59,15 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     """Employee management"""
     queryset = Employee.objects.select_related('user', 'organization', 'branch').prefetch_related('certifications', 'contracts')
     permission_classes = [IsSupervisor]
-    
+
+    def get_permissions(self):
+        # data-consent must be reachable by the employee themselves (PDPA
+        # self-consent). The action body still enforces self-only for
+        # POST/DELETE; supervisors can GET to audit.
+        if self.action == 'data_consent':
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     def get_serializer_class(self):
         if self.action == 'list':
             return EmployeeListSerializer
@@ -216,6 +230,71 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Time slot not found'}, status=status.HTTP_404_NOT_FOUND)
         slot.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get', 'post', 'delete'], url_path='data-consent')
+    def data_consent(self, request, pk=None):
+        """
+        個資使用同意紀錄。
+
+        GET     → 查當前狀態（無紀錄回 204；有則回完整 payload）
+        POST    → 員工首次同意（建立 EmployeeDataConsent）；若已存在但已撤回
+                  則重新啟用（清掉 revoked_at + 更新 consent_version）
+        DELETE  → 撤回（設 revoked_at = now，保留 row 供稽核）
+
+        權限：員工只能操作自己；supervisor 以上可 GET 任何人，但 POST 必須由
+        員工本人發起（避免雇主代簽，違反 PDPA 自主原則）。
+        """
+        employee = self.get_object()
+        is_self = (request.user.is_authenticated
+                   and employee.user_id == request.user.id)
+
+        if request.method == 'GET':
+            try:
+                consent = employee.data_consent
+            except EmployeeDataConsent.DoesNotExist:
+                return Response(
+                    {'detail': 'no consent recorded'},
+                    status=status.HTTP_204_NO_CONTENT,
+                )
+            return Response(EmployeeDataConsentSerializer(consent).data)
+
+        # POST / DELETE require self-action (managers cannot sign on behalf
+        # of an employee — that is the whole point of PDPA consent).
+        if not is_self:
+            return Response(
+                {'error': 'data-consent must be created/revoked by the employee themselves'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if request.method == 'POST':
+            consent_version = request.data.get('consent_version', '1.0')
+            notes = request.data.get('notes', '')
+            consent, created = EmployeeDataConsent.objects.update_or_create(
+                employee=employee,
+                defaults={
+                    'consented_at': timezone.now(),
+                    'revoked_at': None,
+                    'consent_version': consent_version,
+                    'notes': notes,
+                },
+            )
+            return Response(
+                EmployeeDataConsentSerializer(consent).data,
+                status=(status.HTTP_201_CREATED if created else status.HTTP_200_OK),
+            )
+
+        # DELETE
+        try:
+            consent = employee.data_consent
+        except EmployeeDataConsent.DoesNotExist:
+            return Response(
+                {'error': 'no consent to revoke'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if consent.revoked_at is None:
+            consent.revoked_at = timezone.now()
+            consent.save(update_fields=['revoked_at'])
+        return Response(EmployeeDataConsentSerializer(consent).data)
 
     @action(detail=True, methods=['delete'])
     def remove_certification(self, request, pk=None):

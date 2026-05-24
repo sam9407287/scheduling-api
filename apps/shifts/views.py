@@ -6,8 +6,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
 from django.db.models import Q
-from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority
-from .serializers import ShiftTemplateSerializer, ShiftRuleSerializer, ShiftEmployeePrioritySerializer
+from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority, TeamConstraint
+from .serializers import (
+    ShiftTemplateSerializer, ShiftRuleSerializer, ShiftEmployeePrioritySerializer,
+    TeamConstraintSerializer,
+)
 from apps.accounts.permissions import IsManager, IsSupervisor
 
 
@@ -66,6 +69,41 @@ class ShiftTemplateViewSet(viewsets.ModelViewSet):
 
         priorities = shift.employee_priorities.select_related('employee__user').all()
         return Response(ShiftEmployeePrioritySerializer(priorities, many=True).data)
+
+
+class TeamConstraintViewSet(viewsets.ModelViewSet):
+    """
+    Team-constraint CRUD (Notion-filter-style rules consumed by OR-Tools).
+
+    Filtering:
+      - `organization` query param
+      - `shift_template` query param
+      - `branch` query param ('null' string filters to org-wide rules)
+      - `is_active` query param ('true' / 'false')
+    """
+    queryset = TeamConstraint.objects.select_related(
+        'organization', 'branch', 'shift_template'
+    ).all()
+    serializer_class = TeamConstraintSerializer
+    permission_classes = [IsManager]
+    ordering_fields = ['created_at', 'condition_type', 'severity']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if not self.request.user.is_superuser and self.request.user.organization:
+            qs = qs.filter(organization=self.request.user.organization)
+        params = self.request.query_params
+        if params.get('organization'):
+            qs = qs.filter(organization_id=params['organization'])
+        if params.get('shift_template'):
+            qs = qs.filter(shift_template_id=params['shift_template'])
+        if params.get('branch') == 'null':
+            qs = qs.filter(branch__isnull=True)
+        elif params.get('branch'):
+            qs = qs.filter(branch_id=params['branch'])
+        if params.get('is_active') is not None:
+            qs = qs.filter(is_active=params['is_active'].lower() == 'true')
+        return qs
 
 
 class ShiftRuleViewSet(viewsets.ModelViewSet):
