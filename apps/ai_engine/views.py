@@ -39,6 +39,9 @@ def _employee_attributes_for_solver(emp) -> dict:
         'age_years': age,
         'tag_codes': list(emp.tags.values_list('code', flat=True)),
         'certification_ids': list(emp.certifications.values_list('id', flat=True)),
+        # Non-sensitive: the employee themselves picks this preference in
+        # the availability UI, so it is not gated by EmployeeDataConsent.
+        'shift_pattern_preference': emp.shift_pattern_preference,
     }
 
 

@@ -702,7 +702,120 @@ class ORToolsProvider(BaseScheduleProvider):
                 # 低於需求工時懲罰更重（× 5），超過則較輕（× 2）
                 objective_terms.append(5 * under + 2 * over)
 
+        # --- 6. 員工排班模式偏好（PR9: 花花班 vs 連上長假）---
+        objective_terms.extend(
+            self._add_pattern_preference_terms(
+                model, assignments, employees, shifts, days
+            )
+        )
+
         return objective_terms
+
+    # Pattern-preference penalty weights. Chosen below the fairness weight
+    # (=10) so they only act as a tie-breaker; raising them would let an
+    # individual's preference outweigh team-wide fairness, which is the
+    # opposite of what the customer asked for.
+    PATTERN_PENALTY_PER_PAIR = 2
+
+    def _add_pattern_preference_terms(
+        self,
+        model: cp_model.CpModel,
+        assignments: Dict,
+        employees: List[Dict],
+        shifts: List[Dict],
+        days: List[date],
+    ) -> List:
+        """
+        Translate `Employee.shift_pattern_preference` into soft penalties.
+
+        Two preferences are supported; `none` is a no-op:
+
+          * `alternating` — staff who like 花花班. Penalty per pair of
+            consecutive days where the employee works the same time-of-day
+            bucket on both days (e.g. morning Mon AND morning Tue).
+          * `consecutive` — staff who like 連上放長假. Penalty per work/rest
+            transition between consecutive days, so the solver prefers
+            packing work-days together with rest-days together.
+        """
+        from ..team_constraint_compiler import _bucket_for_start_time
+
+        terms: List = []
+        num_days = len(days)
+        if num_days < 2 or not employees or not shifts:
+            return terms
+
+        # Group shifts by time-of-day bucket so we can express "any morning
+        # shift on day d" with a sum over the bucket's shift ids.
+        bucket_of_shift = {
+            s['id']: _bucket_for_start_time(s.get('start_time', '00:00'))
+            for s in shifts
+        }
+        # Avoid n^2 over shifts inside the per-employee loop.
+        shifts_by_bucket: Dict[str, List[int]] = {}
+        for sid, bucket in bucket_of_shift.items():
+            shifts_by_bucket.setdefault(bucket, []).append(sid)
+
+        for emp in employees:
+            pref = (emp.get('attributes') or {}).get('shift_pattern_preference', 'none')
+            if pref == 'none' or pref is None:
+                continue
+            emp_id = emp['id']
+
+            if pref == 'alternating':
+                # Penalty per consecutive same-bucket assignment. For each
+                # bucket and each pair of consecutive days we add a Boolean
+                # `both` that the solver will force to 1 iff the employee
+                # works the bucket on both days; the linearisation uses
+                # three half-implications (both ≤ x, both ≤ y, both ≥ x+y-1).
+                for bucket, sids in shifts_by_bucket.items():
+                    if not sids:
+                        continue
+                    for day_idx in range(num_days - 1):
+                        # x = 1 iff employee works *any* shift in this
+                        # bucket on day_idx; y same for day_idx + 1.
+                        x = model.NewBoolVar(
+                            f'patt_alt_x_e{emp_id}_d{day_idx}_b{bucket}'
+                        )
+                        y = model.NewBoolVar(
+                            f'patt_alt_y_e{emp_id}_d{day_idx + 1}_b{bucket}'
+                        )
+                        model.Add(
+                            x == sum(assignments[emp_id][day_idx][sid] for sid in sids)
+                        )
+                        model.Add(
+                            y == sum(assignments[emp_id][day_idx + 1][sid] for sid in sids)
+                        )
+                        both = model.NewBoolVar(
+                            f'patt_alt_both_e{emp_id}_d{day_idx}_b{bucket}'
+                        )
+                        model.Add(both <= x)
+                        model.Add(both <= y)
+                        model.Add(both >= x + y - 1)
+                        terms.append(self.PATTERN_PENALTY_PER_PAIR * both)
+
+            elif pref == 'consecutive':
+                # Penalty per work/rest transition between consecutive days.
+                # daily_work[d] = 1 iff the employee works any shift on day d.
+                # diff[d] = |daily_work[d] - daily_work[d+1]| (= XOR for binaries).
+                # The model minimises diff, so it equals the actual XOR.
+                daily_work = []
+                for day_idx in range(num_days):
+                    dw = model.NewBoolVar(f'patt_dwork_e{emp_id}_d{day_idx}')
+                    model.Add(
+                        dw == sum(
+                            assignments[emp_id][day_idx][s['id']] for s in shifts
+                        )
+                    )
+                    daily_work.append(dw)
+                for day_idx in range(num_days - 1):
+                    diff = model.NewBoolVar(
+                        f'patt_cons_diff_e{emp_id}_d{day_idx}'
+                    )
+                    model.Add(diff >= daily_work[day_idx] - daily_work[day_idx + 1])
+                    model.Add(diff >= daily_work[day_idx + 1] - daily_work[day_idx])
+                    terms.append(self.PATTERN_PENALTY_PER_PAIR * diff)
+
+        return terms
 
     def _add_labor_law_hard_constraints(
         self,
