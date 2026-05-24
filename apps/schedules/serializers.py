@@ -36,7 +36,7 @@ class ScheduleVersionSerializer(serializers.ModelSerializer):
             'version_label', 'version_type', 'version_type_display',
             'period_start', 'period_end', 'status', 'status_display',
             'approved_by', 'approved_at', 'created_by', 'schedule_count',
-            'created_at', 'updated_at'
+            'derived_from', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

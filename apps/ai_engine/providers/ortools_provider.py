@@ -56,12 +56,29 @@ class ORToolsProvider(BaseScheduleProvider):
             self._add_hard_constraints(
                 model, assignments, employees, shifts, days, request.constraints
             )
+            # 派生 A 模式時，把勞基法規則一併納入硬約束，確保結果必然合法。
+            # 純生成模式（minimize_drift_from_seed=False）仍維持舊行為，由
+            # 外部 compliance check 驗證，避免破壞向後相容。
+            if request.minimize_drift_from_seed and request.seed:
+                self._add_labor_law_hard_constraints(
+                    model, assignments, employees, shifts, days, request.constraints
+                )
 
             # 軟約束（目標函數）
             objective_terms = self._add_soft_constraints(
                 model, assignments, employees, shifts, days,
                 request.constraints, request.preferences,
             )
+
+            # Drift objective：派生 A 模式啟用，按時間遞減權重最小化變更格子數
+            if request.minimize_drift_from_seed and request.seed:
+                objective_terms.extend(self._add_drift_objective(
+                    model, assignments, employees, shifts, days,
+                    seed=request.seed,
+                    today=request.today or date.today(),
+                    time_decay_n=request.time_decay_n,
+                    drift_weight=request.drift_weight,
+                ))
 
             if objective_terms:
                 model.Minimize(sum(objective_terms))
@@ -75,6 +92,9 @@ class ORToolsProvider(BaseScheduleProvider):
                 result_assignments = self._extract_assignments(
                     solver, assignments, employees, shifts, days
                 )
+                mode = ('derive_legal'
+                        if request.minimize_drift_from_seed and request.seed
+                        else 'generate')
                 return ScheduleResult(
                     success=True,
                     assignments=result_assignments,
@@ -84,7 +104,8 @@ class ORToolsProvider(BaseScheduleProvider):
                         'solver': 'OR-Tools CP-SAT',
                         'solve_time_seconds': solver.WallTime(),
                         'status': 'OPTIMAL' if status == cp_model.OPTIMAL else 'FEASIBLE',
-                        'mode': 'generate',
+                        'mode': mode,
+                        'time_decay_n': request.time_decay_n if mode == 'derive_legal' else None,
                     },
                 )
             else:
@@ -670,6 +691,203 @@ class ORToolsProvider(BaseScheduleProvider):
                 objective_terms.append(5 * under + 2 * over)
 
         return objective_terms
+
+    def _add_labor_law_hard_constraints(
+        self,
+        model: cp_model.CpModel,
+        assignments: Dict,
+        employees: List[Dict],
+        shifts: List[Dict],
+        days: List[date],
+        constraints: Dict[str, Any],
+    ):
+        """
+        Enforce labour-law rules as CP-SAT hard constraints. Active only for
+        derive-legal (drift) mode — the generative flow keeps its historical
+        behaviour where these rules are checked post-hoc.
+
+        Currently enforced:
+          1. max_weekly_hours      — Σ shift minutes within an ISO week ≤ cap
+          2. max_consecutive_days  — any sliding window of (cap+1) calendar
+             days has at most `cap` working days
+          3. min_rest_hours        — for every ordered pair of (day_i, shift_a)
+             → (day_j, shift_b) whose start time falls less than
+             `min_rest_hours` after shift_a's end (accounting for cross-
+             midnight shifts), the two cells cannot both be assigned to the
+             same employee.
+        """
+        num_days = len(days)
+        if num_days == 0 or not employees or not shifts:
+            return
+
+        max_weekly_minutes = int(round(
+            float(constraints.get('max_weekly_hours', 40)) * 60
+        ))
+        max_consec = int(constraints.get('max_consecutive_days', 6))
+        min_rest_hours = float(constraints.get('min_rest_hours', 11))
+
+        # --- 1. weekly hours ---
+        shift_minutes = {
+            s['id']: int(round(self._shift_duration_hours(s) * 60))
+            for s in shifts
+        }
+        week_groups: Dict[date, List[int]] = {}
+        for day_idx, day in enumerate(days):
+            wk = day - timedelta(days=day.weekday())
+            week_groups.setdefault(wk, []).append(day_idx)
+        for emp in employees:
+            emp_id = emp['id']
+            for week_idxs in week_groups.values():
+                terms = [
+                    shift_minutes[s['id']] * assignments[emp_id][di][s['id']]
+                    for di in week_idxs
+                    for s in shifts
+                ]
+                model.Add(sum(terms) <= max_weekly_minutes)
+
+        # --- 2. consecutive days ---
+        # daily_work[e][d] = 1 iff employee `e` worked any shift on day `d`.
+        # Sliding window of (max_consec + 1) days ≤ max_consec working days.
+        if num_days >= max_consec + 1:
+            daily_work = {}
+            for emp in employees:
+                emp_id = emp['id']
+                row = []
+                for day_idx in range(num_days):
+                    dw = model.NewBoolVar(f'dwork_e{emp_id}_d{day_idx}')
+                    # One-shift-per-day is already enforced upstream, so
+                    # `sum(...)` ∈ {0,1} and equality to dw is valid.
+                    model.Add(dw == sum(
+                        assignments[emp_id][day_idx][s['id']] for s in shifts
+                    ))
+                    row.append(dw)
+                daily_work[emp_id] = row
+                window = max_consec + 1
+                for start in range(num_days - window + 1):
+                    model.Add(sum(row[start:start + window]) <= max_consec)
+
+        # --- 3. minimum rest hours ---
+        # Forbid every (shift_a on day_i, shift_b on day_j) pair for the same
+        # employee where shift_a's end → shift_b's start is < min_rest_hours.
+        # Iterating cells is O(E·D·S^2) but D and S are small (one period,
+        # tens of shifts at most), so this stays tractable.
+        for i, day_i in enumerate(days):
+            for j, day_j in enumerate(days):
+                # We only need (i, j) where j-i is small enough that an end
+                # on day_i could reach a start on day_j within the threshold.
+                if (day_j - day_i).days < 0 or (day_j - day_i).days > 2:
+                    continue
+                for shift_a in shifts:
+                    end_dt = self._shift_end_datetime(day_i, shift_a)
+                    for shift_b in shifts:
+                        if i == j and shift_a['id'] == shift_b['id']:
+                            continue
+                        start_dt = self._shift_start_datetime(day_j, shift_b)
+                        if start_dt <= end_dt:
+                            # shift_b starts before shift_a ends → handled by
+                            # the one-shift-per-day or same-shift constraints
+                            # elsewhere; skip.
+                            continue
+                        rest_h = (start_dt - end_dt).total_seconds() / 3600
+                        if rest_h >= min_rest_hours:
+                            continue
+                        # Forbid both cells being assigned to the same employee.
+                        for emp in employees:
+                            emp_id = emp['id']
+                            model.Add(
+                                assignments[emp_id][i][shift_a['id']]
+                                + assignments[emp_id][j][shift_b['id']]
+                                <= 1
+                            )
+
+    @staticmethod
+    def _shift_start_datetime(day: date, shift: Dict[str, Any]) -> datetime:
+        start_str = shift.get('start_time', '00:00')
+        try:
+            t = datetime.strptime(start_str[:5], '%H:%M').time()
+        except ValueError:
+            t = datetime.min.time()
+        return datetime.combine(day, t)
+
+    @staticmethod
+    def _shift_end_datetime(day: date, shift: Dict[str, Any]) -> datetime:
+        start_str = shift.get('start_time', '00:00')
+        end_str = shift.get('end_time', '00:00')
+        try:
+            start_t = datetime.strptime(start_str[:5], '%H:%M').time()
+            end_t = datetime.strptime(end_str[:5], '%H:%M').time()
+        except ValueError:
+            return datetime.combine(day, datetime.min.time())
+        end_dt = datetime.combine(day, end_t)
+        # Cross-midnight: end before start → ends on the next calendar day.
+        if end_t < start_t:
+            end_dt += timedelta(days=1)
+        return end_dt
+
+    def _add_drift_objective(
+        self,
+        model: cp_model.CpModel,
+        assignments: Dict,
+        employees: List[Dict],
+        shifts: List[Dict],
+        days: List[date],
+        seed: List[Dict[str, Any]],
+        today: date,
+        time_decay_n: int,
+        drift_weight: int,
+    ) -> List:
+        """
+        Cost = drift_weight × Σ over all cells of: time_weight × |result - seed|
+
+        Where:
+          - seed cell value is 0 or 1 (1 iff (e,d,s) appears in seed).
+          - time_weight = max(1, time_decay_n - |d_to_today|), so cells close
+            to today cost more to change. Past-dated cells use abs() so the
+            same protection applies in either direction.
+          - Because `assignments[e][d][s]` is a 0/1 BoolVar, `|x - seed_val|`
+            linearises to `(1 - x)` if seed=1, or `x` if seed=0 — both are
+            non-negative, so adding them straight into the objective is safe.
+
+        Returns a list of objective terms (already multiplied by drift_weight
+        and time_weight) to be summed into the model's Minimize() call.
+        """
+        seed_set = set()
+        for entry in seed:
+            d_raw = entry.get('date')
+            d_iso = d_raw if isinstance(d_raw, str) else d_raw.isoformat()
+            seed_set.add((entry['employee_id'], d_iso, entry['shift_id']))
+
+        emp_ids = {e['id'] for e in employees}
+        shift_ids = {s['id'] for s in shifts}
+
+        terms: List = []
+        for day_idx, day in enumerate(days):
+            d_iso = day.isoformat()
+            time_weight = max(1, time_decay_n - abs((day - today).days))
+            cell_coef = drift_weight * time_weight
+            for emp in employees:
+                emp_id = emp['id']
+                for shift in shifts:
+                    shift_id = shift['id']
+                    var = assignments[emp_id][day_idx][shift_id]
+                    in_seed = (emp_id, d_iso, shift_id) in seed_set
+                    # diff = var XOR in_seed; linearised below
+                    if in_seed:
+                        # seed had this cell; cost if result does NOT
+                        terms.append(cell_coef * (1 - var))
+                    else:
+                        # seed lacked this cell; cost if result adds it
+                        terms.append(cell_coef * var)
+
+        # Seed cells outside the (emp × shift) cartesian — e.g. an employee
+        # who has left, or a retired shift — cannot be preserved, so they
+        # contribute a fixed cost regardless of the solver. We ignore them
+        # since they cannot influence the search; surfacing them is the
+        # caller's responsibility (diff against the produced schedule).
+        for (emp_id, d_iso, shift_id) in seed_set:
+            if emp_id not in emp_ids or shift_id not in shift_ids:
+                continue  # documented above; no-op term
+        return terms
 
     def _extract_assignments(
         self,

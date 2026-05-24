@@ -43,6 +43,223 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         
         return queryset
     
+    @action(detail=True, methods=['post'], url_path='derive-legal')
+    def derive_legal(self, request, pk=None):
+        """
+        從 B (actual) 派生 A (legal)：在滿足所有勞基法硬約束的前提下，
+        最小化「變更格子數 × 距今時間遞減權重」。
+
+        Request body (optional):
+          - today:        'YYYY-MM-DD'  時間權重的零點 (default: server today)
+          - time_decay_n: int           權重 N (default: 14)
+          - drift_weight: int           drift cost 乘數 (default: 10)
+          - constraints:  dict          覆蓋預設勞基法值 (max_weekly_hours, …)
+          - label:        str           新版本 label (default: "<B-label> (legal)")
+        """
+        from datetime import date as _date
+        from django.db import transaction
+        from django.utils.dateparse import parse_date
+        from .models import Schedule
+        from apps.shifts.models import ShiftTemplate
+        from apps.employees.models import Employee
+        from apps.ai_engine.providers.base import ScheduleRequest
+        from apps.ai_engine.views import get_ai_provider
+
+        b_version = self.get_object()
+        if b_version.version_type != 'actual':
+            return Response(
+                {'error': 'derive-legal must be invoked on an actual (B) version'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        body = request.data or {}
+        today_raw = body.get('today')
+        today = parse_date(today_raw) if today_raw else None
+        if today_raw and not today:
+            return Response(
+                {'error': f'invalid `today` date: {today_raw!r}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        time_decay_n = int(body.get('time_decay_n', 14))
+        drift_weight = int(body.get('drift_weight', 10))
+        constraints_override = dict(body.get('constraints') or {})
+
+        # 1) 載入 B 的所有 schedule rows → seed
+        b_schedules = list(
+            Schedule.objects
+            .filter(schedule_version=b_version)
+            .select_related('shift_template', 'employee')
+        )
+        if not b_schedules:
+            return Response(
+                {'error': 'B version has no schedule rows to derive from'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        seed = [
+            {
+                'employee_id': s.employee_id,
+                'date': s.schedule_date.isoformat(),
+                'shift_id': s.shift_template_id,
+            }
+            for s in b_schedules
+        ]
+
+        # 2) 求解空間 = B 涉及的員工 ∪ 同 org/branch 內所有 active 員工。
+        # 修補 B 時常需要把違規員工的班次轉移給未排到的同事，否則 min_staff
+        # 將無法滿足（這實務上是必要的：B 用了 E1 七天，cap=6，必須由 E2 接手）。
+        b_emp_ids = {s.employee_id for s in b_schedules}
+        shift_ids = {s.shift_template_id for s in b_schedules}
+
+        candidates_qs = (
+            Employee.objects
+            .filter(organization=b_version.organization, is_active=True)
+        )
+        if b_version.branch_id:
+            # 限縮到同分店；若 B 跨分店則前端應在派生前手動拆 B。
+            candidates_qs = candidates_qs.filter(branch_id=b_version.branch_id)
+        # 一律包含 B 涉及的員工（即使他們可能已停用）。
+        candidates_qs = (
+            Employee.objects
+            .filter(
+                pk__in=set(candidates_qs.values_list('pk', flat=True)) | b_emp_ids
+            )
+            .prefetch_related('certifications')
+        )
+
+        employees = [
+            {
+                'id': emp.id,
+                'employee_id': emp.employee_id,
+                'agreed_hours_per_week': float(emp.agreed_hours_per_week),
+                'certifications': list(
+                    emp.certifications.values_list('id', flat=True)
+                ),
+                'unavailable_dates': [],
+                'availability': {},
+            }
+            for emp in candidates_qs
+        ]
+        shifts = [
+            {
+                'id': st.id,
+                'name': st.name,
+                'start_time': st.start_time.isoformat(),
+                'end_time': st.end_time.isoformat(),
+                'break_minutes': st.break_minutes,
+                'min_staff_count': st.min_staff_count,
+                'required_certifications': list(
+                    st.required_certifications.values_list('id', flat=True)
+                ),
+                'employee_priorities': [],
+            }
+            for st in ShiftTemplate.objects
+                .filter(id__in=shift_ids)
+                .prefetch_related('required_certifications')
+        ]
+
+        labor_law_defaults = {
+            'max_weekly_hours': 40,
+            'min_rest_hours': 11,
+            'max_consecutive_days': 6,
+        }
+        labor_law_defaults.update(constraints_override)
+
+        schedule_request = ScheduleRequest(
+            organization_id=b_version.organization_id,
+            branch_id=b_version.branch_id,
+            period_start=b_version.period_start,
+            period_end=b_version.period_end,
+            employees=employees,
+            shift_templates=shifts,
+            constraints=labor_law_defaults,
+            preferences={},
+            seed=seed,
+            minimize_drift_from_seed=True,
+            time_decay_n=time_decay_n,
+            today=today,
+            drift_weight=drift_weight,
+        )
+
+        provider = get_ai_provider()
+        result = provider.generate_schedule(schedule_request)
+        if not result.success:
+            return Response(
+                {
+                    'error': 'derive-legal infeasible',
+                    'violations': result.violations,
+                    'message': result.message,
+                    'metadata': result.metadata,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # 3) 寫入新 A 版本 (atomic)
+        label = body.get('label') or f'{b_version.version_label} (legal)'
+        shift_by_id = {st['id']: st for st in shifts}
+        # 用 ShiftTemplate ORM 物件算 duration_hours（含 break_minutes）
+        shift_orm = {
+            st.id: st for st in ShiftTemplate.objects.filter(id__in=shift_ids)
+        }
+
+        with transaction.atomic():
+            a_version = ScheduleVersion.objects.create(
+                organization=b_version.organization,
+                branch=b_version.branch,
+                version_label=label,
+                version_type='legal',
+                period_start=b_version.period_start,
+                period_end=b_version.period_end,
+                status='draft',
+                created_by=request.user,
+                derived_from=b_version,
+            )
+            new_rows = []
+            for a in result.assignments:
+                d = a['date']
+                shift = shift_orm[a['shift_id']]
+                new_rows.append(Schedule(
+                    schedule_version=a_version,
+                    employee_id=a['employee_id'],
+                    shift_template_id=a['shift_id'],
+                    schedule_date=d if not isinstance(d, str) else _date.fromisoformat(d),
+                    expected_hours=round(shift.duration_hours, 2),
+                    status='draft',
+                ))
+            Schedule.objects.bulk_create(new_rows)
+
+        # 4) 計算 diff 摘要 (cells changed / added / removed)
+        b_set = {(s.employee_id, s.schedule_date.isoformat(), s.shift_template_id)
+                 for s in b_schedules}
+        a_set = {(a['employee_id'], a['date'], a['shift_id'])
+                 for a in result.assignments}
+        removed = sorted(b_set - a_set)
+        added = sorted(a_set - b_set)
+
+        return Response(
+            {
+                'legal_version_id': a_version.id,
+                'legal_version_label': a_version.version_label,
+                'derived_from_id': b_version.id,
+                'solver_metadata': result.metadata,
+                'diff_summary': {
+                    'cells_in_b': len(b_set),
+                    'cells_in_a': len(a_set),
+                    'cells_unchanged': len(b_set & a_set),
+                    'cells_removed_from_b': len(removed),
+                    'cells_added_in_a': len(added),
+                },
+                'removed_cells': [
+                    {'employee_id': e, 'date': d, 'shift_id': sid}
+                    for (e, d, sid) in removed
+                ],
+                'added_cells': [
+                    {'employee_id': e, 'date': d, 'shift_id': sid}
+                    for (e, d, sid) in added
+                ],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     @action(detail=True, methods=['post'], url_path='check-compliance')
     def check_compliance(self, request, pk=None):
         """

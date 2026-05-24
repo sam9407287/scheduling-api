@@ -19,6 +19,18 @@ class ScheduleRequest:
     constraints: Dict[str, Any]  # 硬約束 + 軟約束
     preferences: Dict[str, Any]  # 員工偏好
 
+    # --- Drift / repair mode ---
+    # B → A 派生模式 (minimize_drift_from_seed=True) 用：以 seed 為對照，
+    # 在滿足所有硬約束的前提下最小化「變更格子數 × 時間遞減權重」。
+    # seed 每筆: {employee_id: int, date: 'YYYY-MM-DD', shift_id: int}
+    seed: Optional[List[Dict[str, Any]]] = None
+    minimize_drift_from_seed: bool = False
+    time_decay_n: int = 14
+    # `today` 是時間權重的零點；近期格 (d 接近 0) 改動成本最高。
+    # 預設 None → ORToolsProvider 內部用 date.today()。
+    today: Optional[date] = None
+    drift_weight: int = 10  # objective 中 drift 項的乘數
+
 
 @dataclass
 class ScheduleResult:
