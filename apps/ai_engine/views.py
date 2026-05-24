@@ -1,6 +1,7 @@
 """
 AI Engine views
 """
+from datetime import date as _date
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -10,6 +11,62 @@ from .serializers import ScheduleRequestSerializer, ScheduleResultSerializer
 from .providers.base import BaseScheduleProvider, ScheduleRequest
 from .tasks import generate_schedule_task
 from apps.accounts.permissions import IsManager
+
+
+def _employee_attributes_for_solver(emp) -> dict:
+    """
+    Build the 'attributes' dict the team-constraint compiler reads.
+
+    Sensitive numeric/categorical values go through
+    `sensitive_attributes_for_solver()` which already collapses them to None
+    when the employee has no active EmployeeDataConsent. age_years is derived
+    from birth_date (also gated by consent because birth_date itself is).
+    Non-sensitive sets — tags and certification ids — are always exposed.
+    """
+    sensitive = emp.sensitive_attributes_for_solver()  # gender/birth_date/h/w
+    birth = sensitive.get('birth_date')
+    if birth:
+        today = _date.today()
+        age = today.year - birth.year - (
+            (today.month, today.day) < (birth.month, birth.day)
+        )
+    else:
+        age = None
+    return {
+        'gender': sensitive.get('gender'),
+        'height_cm': float(sensitive['height_cm']) if sensitive.get('height_cm') is not None else None,
+        'weight_kg': float(sensitive['weight_kg']) if sensitive.get('weight_kg') is not None else None,
+        'age_years': age,
+        'tag_codes': list(emp.tags.values_list('code', flat=True)),
+        'certification_ids': list(emp.certifications.values_list('id', flat=True)),
+    }
+
+
+def _load_team_constraints(organization_id: int, branch_id=None) -> list:
+    """Serialise active TeamConstraint rows scoped to org (+ optional branch)."""
+    from apps.shifts.models import TeamConstraint
+    qs = TeamConstraint.objects.filter(
+        organization_id=organization_id, is_active=True
+    )
+    # branch_id filter happens inside the compiler so an org-wide constraint
+    # (branch_id=None) still applies; we only need to fetch everything here.
+    return [
+        {
+            'id': tc.id,
+            'branch_id': tc.branch_id,
+            'shift_template_id': tc.shift_template_id,
+            'scope_time_of_day': tc.scope_time_of_day,
+            'condition_type': tc.condition_type,
+            'condition_operator': tc.condition_operator,
+            'condition_value': tc.condition_value,
+            'quantifier': tc.quantifier,
+            'quantity': tc.quantity,
+            'severity': tc.severity,
+            'is_active': tc.is_active,
+            'description': tc.description or '',
+        }
+        for tc in qs
+    ]
 
 
 def get_ai_provider() -> BaseScheduleProvider:
@@ -181,6 +238,9 @@ class AIEngineViewSet(viewsets.ViewSet):
                     + manual_unavailability.get(str(emp.id), [])
                 )),
                 'availability': avail_data,
+                # Attributes consumed by the team-constraint compiler.
+                # Sensitive fields here are auto-null-gated by EmployeeDataConsent.
+                'attributes': _employee_attributes_for_solver(emp),
             })
 
         # 取得班別
@@ -212,6 +272,35 @@ class AIEngineViewSet(viewsets.ViewSet):
             for shift in shifts_qs
         ]
 
+        # ---- seed: 載入指定 ScheduleVersion 的 schedule rows ----
+        seed = None
+        seed_version_id = data.get('seed_version_id')
+        if seed_version_id:
+            from apps.schedules.models import Schedule as ScheduleModel, ScheduleVersion
+            try:
+                seed_version = ScheduleVersion.objects.get(id=seed_version_id)
+            except ScheduleVersion.DoesNotExist:
+                return Response(
+                    {'error': f'seed_version_id {seed_version_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if (not request.user.is_superuser
+                    and seed_version.organization_id != org_id):
+                return Response(
+                    {'error': 'seed version belongs to a different organization'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            seed = [
+                {
+                    'employee_id': s.employee_id,
+                    'date': s.schedule_date.isoformat(),
+                    'shift_id': s.shift_template_id,
+                }
+                for s in ScheduleModel.objects.filter(schedule_version_id=seed_version_id)
+            ]
+
+        team_constraints = _load_team_constraints(org_id, branch_id)
+
         schedule_request = ScheduleRequest(
             organization_id=org_id,
             branch_id=branch_id,
@@ -221,7 +310,29 @@ class AIEngineViewSet(viewsets.ViewSet):
             shift_templates=shifts,
             constraints=data.get('constraints', {}),
             preferences=data.get('preferences', {}),
+            seed=seed,
+            minimize_drift_from_seed=bool(data.get('minimize_drift_from_seed')),
+            time_decay_n=int(data.get('time_decay_n', 14)),
+            today=data.get('today'),
+            drift_weight=int(data.get('drift_weight', 10)),
+            team_constraints=team_constraints,
+            enforce_labor_law=bool(data.get('enforce_labor_law')),
         )
+
+        # Token billing hook — Phase 2 will turn this into a real transaction.
+        # For now we only label *which* mode would have been charged so the
+        # frontend can preview and the audit log captures intent.
+        billing_mode = (
+            'derive_legal' if (seed and data.get('minimize_drift_from_seed')
+                               and len(seed) >= max(1, int(0.5 * len(employees) * 7)))
+            else 'fill_gaps' if seed and data.get('minimize_drift_from_seed')
+            else 'generate'
+        )
+        billing_metadata = {
+            'consume_token': bool(data.get('consume_token', True)),
+            'billing_mode': billing_mode,
+            'enforce_labor_law': bool(data.get('enforce_labor_law')),
+        }
 
         if data.get('run_async', False):
             task = generate_schedule_task.delay({
@@ -233,14 +344,27 @@ class AIEngineViewSet(viewsets.ViewSet):
                 'shift_templates': schedule_request.shift_templates,
                 'constraints': schedule_request.constraints,
                 'preferences': schedule_request.preferences,
+                'seed': schedule_request.seed,
+                'minimize_drift_from_seed': schedule_request.minimize_drift_from_seed,
+                'time_decay_n': schedule_request.time_decay_n,
+                'today': (schedule_request.today.isoformat()
+                          if schedule_request.today else None),
+                'drift_weight': schedule_request.drift_weight,
+                'team_constraints': schedule_request.team_constraints,
+                'enforce_labor_law': schedule_request.enforce_labor_law,
             })
             return Response(
-                {'task_id': task.id, 'status': 'pending', 'message': '排班任務已提交，請稍後查詢結果'},
+                {'task_id': task.id, 'status': 'pending',
+                 'message': '排班任務已提交，請稍後查詢結果',
+                 'billing': billing_metadata},
                 status=status.HTTP_202_ACCEPTED,
             )
 
         provider = get_ai_provider()
         result = provider.generate_schedule(schedule_request)
+        # Inject billing intent into the result metadata so the frontend can
+        # show "would have charged X tokens" before Phase 2 lands real billing.
+        result.metadata = {**(result.metadata or {}), 'billing': billing_metadata}
         return Response(ScheduleResultSerializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'])

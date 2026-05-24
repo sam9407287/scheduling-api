@@ -36,6 +36,8 @@ def generate_schedule_task(request_data: dict):
         request_data['period_start'] = datetime.fromisoformat(request_data['period_start']).date()
     if isinstance(request_data.get('period_end'), str):
         request_data['period_end'] = datetime.fromisoformat(request_data['period_end']).date()
+    if isinstance(request_data.get('today'), str):
+        request_data['today'] = datetime.fromisoformat(request_data['today']).date()
     
     # 轉換為 ScheduleRequest
     request = ScheduleRequest(**request_data)

@@ -56,12 +56,20 @@ class ORToolsProvider(BaseScheduleProvider):
             self._add_hard_constraints(
                 model, assignments, employees, shifts, days, request.constraints
             )
-            # 派生 A 模式時，把勞基法規則一併納入硬約束，確保結果必然合法。
-            # 純生成模式（minimize_drift_from_seed=False）仍維持舊行為，由
-            # 外部 compliance check 驗證，避免破壞向後相容。
-            if request.minimize_drift_from_seed and request.seed:
+            # 勞基法硬約束：派生 A 模式（一律強制）或顯式 enforce_labor_law=True。
+            # 純生成且未顯式啟用時保持舊行為，由外部 compliance check 驗證。
+            drift_mode = request.minimize_drift_from_seed and request.seed
+            if drift_mode or request.enforce_labor_law:
                 self._add_labor_law_hard_constraints(
                     model, assignments, employees, shifts, days, request.constraints
+                )
+            # 團隊規則（性別/身高/證照等）：以 CP-SAT 動態翻譯
+            tc_soft_terms: List = []
+            if request.team_constraints:
+                from ..team_constraint_compiler import apply_team_constraints
+                tc_soft_terms = apply_team_constraints(
+                    model, assignments, employees, shifts, days,
+                    request.team_constraints, request.branch_id,
                 )
 
             # 軟約束（目標函數）
@@ -69,6 +77,10 @@ class ORToolsProvider(BaseScheduleProvider):
                 model, assignments, employees, shifts, days,
                 request.constraints, request.preferences,
             )
+
+            # Team constraint 軟約束 penalty 項
+            if tc_soft_terms:
+                objective_terms.extend(tc_soft_terms)
 
             # Drift objective：派生 A 模式啟用，按時間遞減權重最小化變更格子數
             if request.minimize_drift_from_seed and request.seed:

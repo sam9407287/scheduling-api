@@ -31,6 +31,19 @@ class ScheduleRequest:
     today: Optional[date] = None
     drift_weight: int = 10  # objective 中 drift 項的乘數
 
+    # --- Team constraints (Notion-filter style 規則) ---
+    # 每筆 dict 對應一個 apps.shifts.models.TeamConstraint 列，欄位包含：
+    #   id, branch_id?, shift_template_id?, scope_time_of_day,
+    #   condition_type, condition_operator, condition_value,
+    #   quantifier, quantity, severity, is_active, description
+    team_constraints: Optional[List[Dict[str, Any]]] = None
+
+    # --- Labor-law toggle ---
+    # True 時把勞基法（週工時、連續工作天數、跨班休息）納入硬約束。
+    # 派生 A 模式 (minimize_drift_from_seed=True) 一律強制；純生成模式
+    # 預設仍為 False，維持舊路徑回傳行為。
+    enforce_labor_law: bool = False
+
 
 @dataclass
 class ScheduleResult:
