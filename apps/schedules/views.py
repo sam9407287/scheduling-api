@@ -43,6 +43,41 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         
         return queryset
     
+    @action(detail=True, methods=['post'], url_path='check-compliance')
+    def check_compliance(self, request, pk=None):
+        """
+        一鍵勞基法合規檢查（不寫入 ComplianceCheck 紀錄，純讀取）。
+
+        回傳結構為前端 grid 設計：`violations` 是逐格列表，每筆已對應到
+        一個特定的 (employee, schedule_date, shift_template_id) 三元組，可直接
+        在 grid 上標記紅色；`summary_by_rule` 給側邊 panel 用。
+        客製規則可透過 request body `rules` 覆蓋預設值。
+        """
+        from apps.compliance.engine import (
+            check_schedule_violations,
+            summarize_by_rule,
+            DEFAULT_RULES,
+        )
+
+        version = self.get_object()
+        rules = request.data.get('rules') or None
+
+        try:
+            violations = check_schedule_violations(version, rules)
+        except (ValueError, TypeError) as exc:
+            return Response(
+                {'error': f'invalid rules payload: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            'schedule_version_id': version.id,
+            'rules_applied': rules or DEFAULT_RULES,
+            'violations': [v.to_dict() for v in violations],
+            'summary_by_rule': summarize_by_rule(violations),
+            'total_count': len(violations),
+        })
+
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """簽核排班版本"""
