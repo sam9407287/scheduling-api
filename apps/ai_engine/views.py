@@ -319,20 +319,61 @@ class AIEngineViewSet(viewsets.ViewSet):
             enforce_labor_law=bool(data.get('enforce_labor_law')),
         )
 
-        # Token billing hook — Phase 2 will turn this into a real transaction.
-        # For now we only label *which* mode would have been charged so the
-        # frontend can preview and the audit log captures intent.
+        # Classify the request into one of the three metered modes. The seed-
+        # density heuristic distinguishes "AI 補齊" (sparse seed) from
+        # "派生 A" (dense seed) so the customer sees a fair price preview.
         billing_mode = (
             'derive_legal' if (seed and data.get('minimize_drift_from_seed')
                                and len(seed) >= max(1, int(0.5 * len(employees) * 7)))
             else 'fill_gaps' if seed and data.get('minimize_drift_from_seed')
             else 'generate'
         )
+        consume_token = bool(data.get('consume_token', True))
         billing_metadata = {
-            'consume_token': bool(data.get('consume_token', True)),
+            'consume_token': consume_token,
             'billing_mode': billing_mode,
             'enforce_labor_law': bool(data.get('enforce_labor_law')),
         }
+
+        # ---- Pre-flight monthly cap check (PR8) -------------------------
+        from apps.organizations.models import Organization
+        from apps.billing.models import (
+            would_exceed_cap, record_usage, OrgBillingSettings,
+            estimate_tokens,
+        )
+        try:
+            org_obj = Organization.objects.get(id=org_id)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'organization {org_id} not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        # Allow callers to opt out (consume_token=false) for dry runs;
+        # otherwise check both the kill-switch and the monthly cap *before*
+        # spinning up the solver — solver runs are expensive, denying early
+        # avoids wasting solve_time on customers who will be 402'd anyway.
+        if consume_token:
+            org_settings = OrgBillingSettings.objects.filter(
+                organization=org_obj
+            ).first()
+            if org_settings and not org_settings.is_billing_enabled:
+                return Response(
+                    {'error': 'billing is disabled for this organization',
+                     'billing_mode': billing_mode},
+                    status=status.HTTP_402_PAYMENT_REQUIRED,
+                )
+            exceeds, current, projected, cap = would_exceed_cap(
+                org_obj, billing_mode,
+            )
+            if exceeds:
+                return Response({
+                    'error': 'monthly billing cap exceeded',
+                    'billing_mode': billing_mode,
+                    'tokens_required': estimate_tokens(billing_mode),
+                    'current_period_tokens': current,
+                    'projected_period_tokens': projected,
+                    'monthly_cap_tokens': cap,
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
 
         if data.get('run_async', False):
             task = generate_schedule_task.delay({
@@ -352,6 +393,18 @@ class AIEngineViewSet(viewsets.ViewSet):
                 'drift_weight': schedule_request.drift_weight,
                 'team_constraints': schedule_request.team_constraints,
                 'enforce_labor_law': schedule_request.enforce_labor_law,
+                # Billing hand-off — task records usage after the solver.
+                # Cap is already pre-checked here; the task only writes.
+                '_billing': {
+                    'mode': billing_mode,
+                    'consume_token': consume_token,
+                    'org_id': org_obj.id,
+                    'user_id': request.user.id if request.user.is_authenticated else None,
+                    'period_start': period_start.isoformat(),
+                    'period_end': period_end.isoformat(),
+                    'employee_count': len(employees),
+                    'shift_count': len(shifts),
+                },
             })
             return Response(
                 {'task_id': task.id, 'status': 'pending',
@@ -362,8 +415,34 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         provider = get_ai_provider()
         result = provider.generate_schedule(schedule_request)
-        # Inject billing intent into the result metadata so the frontend can
-        # show "would have charged X tokens" before Phase 2 lands real billing.
+
+        # ---- Post-debit (PR8) -----------------------------------------
+        # Pre-debit per the customer rule (先扱不退): we record usage on
+        # success AND on INFEASIBLE/error. Callers can suppress by setting
+        # consume_token=false (dry-run / internal use).
+        if consume_token:
+            if result.success:
+                solver_status_for_billing = 'success'
+            elif any(v.get('type') == 'error' for v in (result.violations or [])):
+                solver_status_for_billing = 'error'
+            else:
+                solver_status_for_billing = 'infeasible'
+            usage = record_usage(
+                organization=org_obj,
+                billing_mode=billing_mode,
+                solver_status=solver_status_for_billing,
+                user=request.user if request.user.is_authenticated else None,
+                schedule_version=None,
+                request_metadata={
+                    'period_start': period_start.isoformat(),
+                    'period_end': period_end.isoformat(),
+                    'employee_count': len(employees),
+                    'shift_count': len(shifts),
+                },
+            )
+            billing_metadata['tokens_charged'] = usage.tokens_charged
+            billing_metadata['period_usage_after'] = usage.billing_period.total_tokens
+
         result.metadata = {**(result.metadata or {}), 'billing': billing_metadata}
         return Response(ScheduleResultSerializer(result).data, status=status.HTTP_200_OK)
 

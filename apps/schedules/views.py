@@ -64,6 +64,10 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         from apps.employees.models import Employee
         from apps.ai_engine.providers.base import ScheduleRequest
         from apps.ai_engine.views import get_ai_provider
+        from apps.billing.models import (
+            would_exceed_cap, record_usage, estimate_tokens,
+            OrgBillingSettings,
+        )
 
         b_version = self.get_object()
         if b_version.version_type != 'actual':
@@ -73,6 +77,33 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             )
 
         body = request.data or {}
+        consume_token = bool(body.get('consume_token', True))
+
+        # Pre-flight monthly cap check. derive-legal is always billing_mode
+        # 'derive_legal' regardless of seed density (this is the explicit
+        # "produce A from B" button on the frontend).
+        if consume_token:
+            org_settings = OrgBillingSettings.objects.filter(
+                organization=b_version.organization
+            ).first()
+            if org_settings and not org_settings.is_billing_enabled:
+                return Response(
+                    {'error': 'billing is disabled for this organization',
+                     'billing_mode': 'derive_legal'},
+                    status=status.HTTP_402_PAYMENT_REQUIRED,
+                )
+            exceeds, current, projected, cap = would_exceed_cap(
+                b_version.organization, 'derive_legal',
+            )
+            if exceeds:
+                return Response({
+                    'error': 'monthly billing cap exceeded',
+                    'billing_mode': 'derive_legal',
+                    'tokens_required': estimate_tokens('derive_legal'),
+                    'current_period_tokens': current,
+                    'projected_period_tokens': projected,
+                    'monthly_cap_tokens': cap,
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
         today_raw = body.get('today')
         today = parse_date(today_raw) if today_raw else None
         if today_raw and not today:
@@ -183,12 +214,34 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         provider = get_ai_provider()
         result = provider.generate_schedule(schedule_request)
         if not result.success:
+            # Pre-debit: failed solves still incur a charge. Customer rule
+            # is "先扱不退" — an INFEASIBLE result still uses solver time.
+            billing_payload = None
+            if consume_token:
+                solver_status = (
+                    'error' if any(v.get('type') == 'error'
+                                   for v in (result.violations or []))
+                    else 'infeasible'
+                )
+                usage = record_usage(
+                    organization=b_version.organization,
+                    billing_mode='derive_legal',
+                    solver_status=solver_status,
+                    user=request.user if request.user.is_authenticated else None,
+                    schedule_version=b_version,
+                    request_metadata={'derived_from_id': b_version.id},
+                )
+                billing_payload = {
+                    'tokens_charged': usage.tokens_charged,
+                    'period_usage_after': usage.billing_period.total_tokens,
+                }
             return Response(
                 {
                     'error': 'derive-legal infeasible',
                     'violations': result.violations,
                     'message': result.message,
                     'metadata': result.metadata,
+                    'billing': billing_payload,
                 },
                 status=status.HTTP_409_CONFLICT,
             )
@@ -235,6 +288,26 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         removed = sorted(b_set - a_set)
         added = sorted(a_set - b_set)
 
+        billing_payload = None
+        if consume_token:
+            usage = record_usage(
+                organization=b_version.organization,
+                billing_mode='derive_legal',
+                solver_status='success',
+                user=request.user if request.user.is_authenticated else None,
+                schedule_version=a_version,
+                request_metadata={
+                    'derived_from_id': b_version.id,
+                    'cells_in_b': len(b_set),
+                    'cells_changed': len(removed) + len(added),
+                },
+            )
+            billing_payload = {
+                'tokens_charged': usage.tokens_charged,
+                'period_usage_after': usage.billing_period.total_tokens,
+                'billing_mode': 'derive_legal',
+            }
+
         return Response(
             {
                 'legal_version_id': a_version.id,
@@ -256,6 +329,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                     {'employee_id': e, 'date': d, 'shift_id': sid}
                     for (e, d, sid) in added
                 ],
+                'billing': billing_payload,
             },
             status=status.HTTP_201_CREATED,
         )
