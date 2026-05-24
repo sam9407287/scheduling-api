@@ -27,4 +27,5 @@ urlpatterns = [
     path('api/overtime/', include('apps.overtime.urls')),
     path('api/compliance/', include('apps.compliance.urls')),
     path('api/ai/', include('apps.ai_engine.urls')),
+    path('api/billing/', include('apps.billing.urls')),
 ]

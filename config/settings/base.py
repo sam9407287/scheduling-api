@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'apps.compliance',
     'apps.ai_engine',
     'apps.audit',
+    'apps.billing',
 ]
 
 MIDDLEWARE = [
