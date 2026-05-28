@@ -169,6 +169,22 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
+# Celery Beat — periodic tasks. The billing-threshold scan runs hourly.
+CELERY_BEAT_SCHEDULE = {
+    'scan-billing-thresholds': {
+        'task': 'apps.billing.tasks.scan_billing_thresholds',
+        'schedule': 3600.0,  # every hour
+    },
+}
+
+# Email. Phase 3 uses the console backend (alerts are logged, not actually
+# delivered). Phase 4 will switch EMAIL_BACKEND via env var to a real
+# provider — no code change needed beyond the env var + credentials.
+EMAIL_BACKEND = os.getenv(
+    'EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend'
+)
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@scheduling-api.local')
+
 # AI Provider
 AI_SCHEDULE_PROVIDER = os.getenv(
     'AI_SCHEDULE_PROVIDER',

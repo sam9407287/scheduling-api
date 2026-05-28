@@ -1,8 +1,18 @@
 from django.contrib import admin
 from .models import (
     BillingRateConfig, OrgBillingSettings, BillingPeriod, UsageRecord,
-    PaymentMethod,
+    PaymentMethod, BillingAlert,
 )
+
+
+@admin.register(BillingAlert)
+class BillingAlertAdmin(admin.ModelAdmin):
+    list_display = ['organization', 'billing_period', 'threshold_pct',
+                    'tokens_at_alert', 'recipient', 'sent_at']
+    list_filter = ['threshold_pct', 'sent_at']
+    search_fields = ['organization__name', 'organization__code']
+    readonly_fields = ['organization', 'billing_period', 'threshold_pct',
+                       'tokens_at_alert', 'recipient', 'sent_at']
 
 
 @admin.register(BillingRateConfig)

@@ -244,6 +244,44 @@ class UsageRecord(models.Model):
         )
 
 
+class BillingAlert(models.Model):
+    """
+    Dedupe ledger for monthly-usage threshold alerts (PR12).
+
+    One row per (billing_period, threshold_pct) crossing. The Celery beat
+    scan checks for an existing row before sending, so a customer gets at
+    most one alert per threshold per month even though the scan runs
+    hourly. Multiple thresholds (e.g. an 80% and a 100% rule in future)
+    each get their own row.
+    """
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='billing_alerts',
+        verbose_name='所屬機構',
+    )
+    billing_period = models.ForeignKey(
+        BillingPeriod,
+        on_delete=models.CASCADE,
+        related_name='alerts',
+        verbose_name='所屬週期',
+    )
+    threshold_pct = models.PositiveSmallIntegerField(verbose_name='觸發門檻 (%)')
+    tokens_at_alert = models.PositiveIntegerField(verbose_name='觸發時累積 token')
+    recipient = models.EmailField(blank=True, default='', verbose_name='通知對象')
+    sent_at = models.DateTimeField(auto_now_add=True, verbose_name='寄送時間')
+
+    class Meta:
+        verbose_name = '計費通知'
+        verbose_name_plural = '計費通知'
+        unique_together = [['billing_period', 'threshold_pct']]
+        ordering = ['-sent_at']
+
+    def __str__(self):
+        return (f'{self.organization.code} {self.billing_period.period_year}-'
+                f'{self.billing_period.period_month:02d} @ {self.threshold_pct}%')
+
+
 class PaymentMethod(models.Model):
     """
     Mock-only in Phase 2; Stripe integration lands in Phase 3.
