@@ -73,10 +73,10 @@ All business logic lives under `apps/`:
 | `schedules` | ScheduleVersion (with **`derived_from`** self FK, PR1), Schedule rows, ScheduleChange. Endpoints: `check-compliance/` (PR2), `derive-legal/` (PR3) |
 | `attendance` | Clock-in/out, anomaly detection |
 | `overtime` | OvertimeRecord, OvertimeRule, pay multiplier calculation |
-| `compliance` | **Per-cell `Violation` dataclass** (PR2), `check_schedule_violations()` pure function, ComplianceCheck history |
+| `compliance` | **Per-cell `Violation` dataclass** (PR2), `check_schedule_violations()` pure function, ComplianceCheck history, **OrgComplianceSettings** soft/hard rule config (PR11). Endpoint: `/api/compliance/settings/` |
 | `ai_engine` | ORToolsProvider (single provider parameterised by mode), **team_constraint_compiler.py** (PR4), Celery task. Endpoint: `POST /api/ai/schedule/generate/` (unified) |
 | `audit` | AuditLog model, middleware + signals that log all model writes |
-| **`billing`** | **Phase 2 metered billing**. Models: BillingRateConfig, OrgBillingSettings, BillingPeriod, UsageRecord, PaymentMethod (mock today). Pure helpers: `estimate_tokens`, `record_usage`, `would_exceed_cap`. Endpoints: `/api/billing/{rates,usage,settings,estimate}/` |
+| **`billing`** | **Phase 2 metered billing + Phase 3 alerts**. Models: BillingRateConfig, OrgBillingSettings, BillingPeriod, UsageRecord, PaymentMethod (mock), **BillingAlert** (PR12 dedupe). Pure helpers: `estimate_tokens`, `record_usage`, `would_exceed_cap`. Task: `scan_billing_thresholds` (hourly beat). Endpoints: `/api/billing/{rates,usage,settings,estimate}/` |
 
 ### Authentication
 
@@ -196,8 +196,15 @@ Quick reference for "which commit introduced X":
 | `23676e6` | PR9: shift_pattern_preference soft constraints (alternating / consecutive) |
 | `f6bee07` | PR10: Phase 2 frontend guide |
 | `ecbf089` | Integration / cross-PR boundary test suite (9 cases) |
+| `4b9848d` | docs: ARCHITECTURE.md + BUSINESS_FLOWS.md + refreshed CLAUDE.md |
+| `7e73b42` | PR11 (Phase 3): soft vs hard labour-law rule severity + OrgComplianceSettings |
+| `f1933ce` | PR12 (Phase 3): monthly usage threshold alerts (Celery beat, console email) |
 
-Total test count: **245 passing + 1 SQLite-skipped**.
+Total test count: **264 passing + 1 SQLite-skipped**.
+
+Phase boundaries: Phase 1 = PR1-5, Phase 2 = PR6-10 + integration tests,
+Phase 3 = PR11-13. Stripe payment + labour-law RAG are deferred to Phase 4
+(see [docs/BUSINESS_FLOWS.md](./docs/BUSINESS_FLOWS.md) §9).
 
 ## Where to read next
 
@@ -207,7 +214,7 @@ Three docs sit alongside this file:
 |---|---|---|
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Engineers, ops | You need the system topology, layered constraints, billing pipeline detail, or the deployment story |
 | [docs/BUSINESS_FLOWS.md](./docs/BUSINESS_FLOWS.md) (中文) | PM, sales, customer IT | You need the "why" — what does the customer actually do, what are the business rules, how does the consent / billing flow look from a user's perspective |
-| [docs/PHASE_1_FRONTEND_GUIDE.md](./docs/PHASE_1_FRONTEND_GUIDE.md) & [docs/PHASE_2_FRONTEND_GUIDE.md](./docs/PHASE_2_FRONTEND_GUIDE.md) | Frontend engineers | API contract reference per phase; request/response shapes, status codes, UX recommendations |
+| [docs/PHASE_1_FRONTEND_GUIDE.md](./docs/PHASE_1_FRONTEND_GUIDE.md), [PHASE_2](./docs/PHASE_2_FRONTEND_GUIDE.md) & [PHASE_3](./docs/PHASE_3_FRONTEND_GUIDE.md) | Frontend engineers | API contract reference per phase; request/response shapes, status codes, UX recommendations |
 | [docs/adr/ADR-0001-deployment-platform.md](./docs/adr/ADR-0001-deployment-platform.md) | Anyone touching deploy | Why Railway, what the trade-offs are |
 | [docs/deployment-plan.md](./docs/deployment-plan.md) | Anyone deploying | Step-by-step deploy sequence with security/observability checklists |
 
