@@ -304,6 +304,15 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         team_constraints = _load_team_constraints(org_id, branch_id)
 
+        # Soft labour-law rules (PR11): caller override else org config.
+        from apps.compliance.models import OrgComplianceSettings
+        soft_labor_rules = data.get('soft_rule_types')
+        if soft_labor_rules is None:
+            cfg = OrgComplianceSettings.objects.filter(
+                organization_id=org_id
+            ).first()
+            soft_labor_rules = cfg.soft_rule_types if cfg else []
+
         schedule_request = ScheduleRequest(
             organization_id=org_id,
             branch_id=branch_id,
@@ -320,6 +329,7 @@ class AIEngineViewSet(viewsets.ViewSet):
             drift_weight=int(data.get('drift_weight', 10)),
             team_constraints=team_constraints,
             enforce_labor_law=bool(data.get('enforce_labor_law')),
+            soft_labor_rules=soft_labor_rules,
         )
 
         # Classify the request into one of the three metered modes. The seed-
@@ -396,6 +406,7 @@ class AIEngineViewSet(viewsets.ViewSet):
                 'drift_weight': schedule_request.drift_weight,
                 'team_constraints': schedule_request.team_constraints,
                 'enforce_labor_law': schedule_request.enforce_labor_law,
+                'soft_labor_rules': schedule_request.soft_labor_rules,
                 # Billing hand-off — task records usage after the solver.
                 # Cap is already pre-checked here; the task only writes.
                 '_billing': {

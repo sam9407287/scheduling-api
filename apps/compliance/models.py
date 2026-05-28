@@ -44,6 +44,44 @@ class LaborLawRule(models.Model):
         return f"{self.name} ({self.get_rule_type_display()})"
 
 
+class OrgComplianceSettings(models.Model):
+    """
+    Per-organisation labour-law severity configuration (PR11).
+
+    `soft_rule_types` lists the rule types the organisation has chosen to
+    treat as *soft*: still reported by the one-click compliance check (the
+    customer wants every labour-law hit shown as a reminder), but in
+    derive-legal they become heavy objective penalties instead of hard
+    constraints — so the solver avoids them when it can but will not go
+    INFEASIBLE if respecting them is impossible.
+
+    Valid entries match the engine's rule keys:
+      max_weekly_hours, max_consecutive_days, min_rest_hours, max_daily_hours
+
+    An empty list (the default) means every labour-law rule is hard.
+    """
+    organization = models.OneToOneField(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='compliance_settings',
+        verbose_name='所屬機構',
+    )
+    soft_rule_types = models.JSONField(
+        default=list, blank=True,
+        verbose_name='軟性規則類型（其餘視為硬性）',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '機構合規設定'
+        verbose_name_plural = '機構合規設定'
+
+    def __str__(self):
+        soft = self.soft_rule_types or []
+        return f'{self.organization.code} soft={soft or "(none)"}'
+
+
 class ComplianceCheck(models.Model):
     """合規檢查紀錄"""
     STATUS_CHOICES = [

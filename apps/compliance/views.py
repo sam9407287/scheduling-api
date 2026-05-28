@@ -5,12 +5,55 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 from django.db.models import Q
-from .models import LaborLawRule, ComplianceCheck
-from .serializers import LaborLawRuleSerializer, ComplianceCheckSerializer
+from .models import LaborLawRule, ComplianceCheck, OrgComplianceSettings
+from .serializers import (
+    LaborLawRuleSerializer, ComplianceCheckSerializer,
+    OrgComplianceSettingsSerializer,
+)
 from .engine import ComplianceEngine
 from apps.accounts.permissions import IsManager
 from apps.schedules.models import ScheduleVersion
+
+
+class OrgComplianceSettingsView(APIView):
+    """
+    GET / PATCH the caller-org's labour-law severity settings (PR11).
+
+    Body for PATCH: { "soft_rule_types": ["max_weekly_hours", ...] }
+    Rules listed are reported as soft (yellow) by the compliance check and
+    relaxed to penalties (not hard constraints) in derive-legal.
+    """
+    permission_classes = [IsManager]
+
+    def _settings_for_caller(self, request):
+        org = request.user.organization
+        if not org:
+            return None, Response(
+                {'error': 'user has no organization'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        row, _ = OrgComplianceSettings.objects.get_or_create(organization=org)
+        return row, None
+
+    def get(self, request):
+        row, err = self._settings_for_caller(request)
+        if err:
+            return err
+        return Response(OrgComplianceSettingsSerializer(row).data)
+
+    def patch(self, request):
+        row, err = self._settings_for_caller(request)
+        if err:
+            return err
+        serializer = OrgComplianceSettingsSerializer(
+            row, data=request.data, partial=True,
+        )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class LaborLawRuleViewSet(viewsets.ModelViewSet):

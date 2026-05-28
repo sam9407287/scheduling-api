@@ -195,6 +195,15 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         }
         labor_law_defaults.update(constraints_override)
 
+        # Soft labour-law rules (PR11): caller override else org config.
+        from apps.compliance.models import OrgComplianceSettings
+        soft_labor_rules = body.get('soft_rule_types')
+        if soft_labor_rules is None:
+            cfg = OrgComplianceSettings.objects.filter(
+                organization=b_version.organization
+            ).first()
+            soft_labor_rules = cfg.soft_rule_types if cfg else []
+
         schedule_request = ScheduleRequest(
             organization_id=b_version.organization_id,
             branch_id=b_version.branch_id,
@@ -209,6 +218,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             time_decay_n=time_decay_n,
             today=today,
             drift_weight=drift_weight,
+            soft_labor_rules=soft_labor_rules,
         )
 
         provider = get_ai_provider()
@@ -349,12 +359,24 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             summarize_by_rule,
             DEFAULT_RULES,
         )
+        from apps.compliance.models import OrgComplianceSettings
 
         version = self.get_object()
         rules = request.data.get('rules') or None
 
+        # Load the org's soft-rule config so violations get the right
+        # severity label (PR11). Caller may override via body `soft_rule_types`.
+        soft_rule_types = request.data.get('soft_rule_types')
+        if soft_rule_types is None:
+            cfg = OrgComplianceSettings.objects.filter(
+                organization=version.organization
+            ).first()
+            soft_rule_types = cfg.soft_rule_types if cfg else []
+
         try:
-            violations = check_schedule_violations(version, rules)
+            violations = check_schedule_violations(
+                version, rules, soft_rule_types=soft_rule_types,
+            )
         except (ValueError, TypeError) as exc:
             return Response(
                 {'error': f'invalid rules payload: {exc}'},
@@ -364,6 +386,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         return Response({
             'schedule_version_id': version.id,
             'rules_applied': rules or DEFAULT_RULES,
+            'soft_rule_types': soft_rule_types,
             'violations': [v.to_dict() for v in violations],
             'summary_by_rule': summarize_by_rule(violations),
             'total_count': len(violations),

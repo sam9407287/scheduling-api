@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import LaborLawRule, ComplianceCheck
+from .models import LaborLawRule, ComplianceCheck, OrgComplianceSettings
+
+
+@admin.register(OrgComplianceSettings)
+class OrgComplianceSettingsAdmin(admin.ModelAdmin):
+    list_display = ['organization', 'soft_rule_types', 'updated_at']
+    search_fields = ['organization__name', 'organization__code']
 
 
 @admin.register(LaborLawRule)

@@ -44,6 +44,13 @@ class ScheduleRequest:
     # 預設仍為 False，維持舊路徑回傳行為。
     enforce_labor_law: bool = False
 
+    # --- Soft labour-law rules (PR11) ---
+    # Rule types listed here become heavy objective penalties instead of
+    # hard constraints, so the solver avoids but won't go INFEASIBLE over
+    # them. Valid entries: max_weekly_hours, max_consecutive_days,
+    # min_rest_hours. None / empty = all labour-law rules are hard.
+    soft_labor_rules: Optional[List[str]] = None
+
 
 @dataclass
 class ScheduleResult:

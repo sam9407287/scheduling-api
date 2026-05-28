@@ -59,9 +59,11 @@ class ORToolsProvider(BaseScheduleProvider):
             # 勞基法硬約束：派生 A 模式（一律強制）或顯式 enforce_labor_law=True。
             # 純生成且未顯式啟用時保持舊行為，由外部 compliance check 驗證。
             drift_mode = request.minimize_drift_from_seed and request.seed
+            labor_soft_terms: List = []
             if drift_mode or request.enforce_labor_law:
-                self._add_labor_law_hard_constraints(
-                    model, assignments, employees, shifts, days, request.constraints
+                labor_soft_terms = self._add_labor_law_hard_constraints(
+                    model, assignments, employees, shifts, days, request.constraints,
+                    soft_rule_types=request.soft_labor_rules,
                 )
             # 團隊規則（性別/身高/證照等）：以 CP-SAT 動態翻譯
             tc_soft_terms: List = []
@@ -81,6 +83,10 @@ class ORToolsProvider(BaseScheduleProvider):
             # Team constraint 軟約束 penalty 項
             if tc_soft_terms:
                 objective_terms.extend(tc_soft_terms)
+
+            # 軟性勞基法規則 penalty 項（PR11）
+            if labor_soft_terms:
+                objective_terms.extend(labor_soft_terms)
 
             # Drift objective：派生 A 模式啟用，按時間遞減權重最小化變更格子數
             if request.minimize_drift_from_seed and request.seed:
@@ -817,6 +823,13 @@ class ORToolsProvider(BaseScheduleProvider):
 
         return terms
 
+    # Soft labour-law violation weight. Far above any preference weight so
+    # the solver only ever leaves a soft labour-law rule violated when there
+    # is literally no feasible alternative — but unlike a hard constraint it
+    # will not make the whole solve INFEASIBLE. Customer wants every
+    # labour-law hit *shown*, not necessarily *blocked*.
+    SOFT_LABOR_WEIGHT = 50
+
     def _add_labor_law_hard_constraints(
         self,
         model: cp_model.CpModel,
@@ -825,31 +838,38 @@ class ORToolsProvider(BaseScheduleProvider):
         shifts: List[Dict],
         days: List[date],
         constraints: Dict[str, Any],
-    ):
+        soft_rule_types=None,
+    ) -> List:
         """
-        Enforce labour-law rules as CP-SAT hard constraints. Active only for
-        derive-legal (drift) mode — the generative flow keeps its historical
-        behaviour where these rules are checked post-hoc.
+        Apply labour-law rules. A rule whose type is listed in
+        `soft_rule_types` becomes an objective *penalty* (heavy weight,
+        won't cause INFEASIBLE); every other rule is a hard CP-SAT
+        constraint. Returns the list of soft penalty terms for the caller
+        to fold into Minimize(); hard constraints are added in place.
 
-        Currently enforced:
+        Rules:
           1. max_weekly_hours      — Σ shift minutes within an ISO week ≤ cap
           2. max_consecutive_days  — any sliding window of (cap+1) calendar
              days has at most `cap` working days
-          3. min_rest_hours        — for every ordered pair of (day_i, shift_a)
-             → (day_j, shift_b) whose start time falls less than
-             `min_rest_hours` after shift_a's end (accounting for cross-
-             midnight shifts), the two cells cannot both be assigned to the
-             same employee.
+          3. min_rest_hours        — for every ordered (day_i, shift_a) →
+             (day_j, shift_b) pair whose rest gap < threshold (cross-midnight
+             aware), the two cells cannot both go to the same employee.
         """
+        soft = set(soft_rule_types or ())
+        penalty_terms: List = []
         num_days = len(days)
         if num_days == 0 or not employees or not shifts:
-            return
+            return penalty_terms
 
         max_weekly_minutes = int(round(
             float(constraints.get('max_weekly_hours', 40)) * 60
         ))
         max_consec = int(constraints.get('max_consecutive_days', 6))
         min_rest_hours = float(constraints.get('min_rest_hours', 11))
+
+        weekly_soft = 'max_weekly_hours' in soft
+        consec_soft = 'max_consecutive_days' in soft
+        rest_soft = 'min_rest_hours' in soft
 
         # --- 1. weekly hours ---
         shift_minutes = {
@@ -862,44 +882,52 @@ class ORToolsProvider(BaseScheduleProvider):
             week_groups.setdefault(wk, []).append(day_idx)
         for emp in employees:
             emp_id = emp['id']
-            for week_idxs in week_groups.values():
-                terms = [
+            for wk, week_idxs in week_groups.items():
+                week_minutes = sum(
                     shift_minutes[s['id']] * assignments[emp_id][di][s['id']]
                     for di in week_idxs
                     for s in shifts
-                ]
-                model.Add(sum(terms) <= max_weekly_minutes)
+                )
+                if weekly_soft:
+                    # over ≥ excess minutes; minimise → over = max(0, excess).
+                    over = model.NewIntVar(
+                        0, max_weekly_minutes * len(week_idxs) + 1,
+                        f'soft_wk_e{emp_id}_{wk.isoformat()}',
+                    )
+                    model.Add(week_minutes - max_weekly_minutes <= over)
+                    # Scale down minutes → ~hours so the weight is comparable
+                    # to other rules' per-unit penalties (1 unit ≈ 1 hour over).
+                    penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
+                else:
+                    model.Add(week_minutes <= max_weekly_minutes)
 
         # --- 2. consecutive days ---
-        # daily_work[e][d] = 1 iff employee `e` worked any shift on day `d`.
-        # Sliding window of (max_consec + 1) days ≤ max_consec working days.
         if num_days >= max_consec + 1:
-            daily_work = {}
             for emp in employees:
                 emp_id = emp['id']
                 row = []
                 for day_idx in range(num_days):
                     dw = model.NewBoolVar(f'dwork_e{emp_id}_d{day_idx}')
-                    # One-shift-per-day is already enforced upstream, so
-                    # `sum(...)` ∈ {0,1} and equality to dw is valid.
                     model.Add(dw == sum(
                         assignments[emp_id][day_idx][s['id']] for s in shifts
                     ))
                     row.append(dw)
-                daily_work[emp_id] = row
                 window = max_consec + 1
                 for start in range(num_days - window + 1):
-                    model.Add(sum(row[start:start + window]) <= max_consec)
+                    window_sum = sum(row[start:start + window])
+                    if consec_soft:
+                        over = model.NewIntVar(
+                            0, window,
+                            f'soft_cons_e{emp_id}_w{start}',
+                        )
+                        model.Add(window_sum - max_consec <= over)
+                        penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
+                    else:
+                        model.Add(window_sum <= max_consec)
 
         # --- 3. minimum rest hours ---
-        # Forbid every (shift_a on day_i, shift_b on day_j) pair for the same
-        # employee where shift_a's end → shift_b's start is < min_rest_hours.
-        # Iterating cells is O(E·D·S^2) but D and S are small (one period,
-        # tens of shifts at most), so this stays tractable.
         for i, day_i in enumerate(days):
             for j, day_j in enumerate(days):
-                # We only need (i, j) where j-i is small enough that an end
-                # on day_i could reach a start on day_j within the threshold.
                 if (day_j - day_i).days < 0 or (day_j - day_i).days > 2:
                     continue
                 for shift_a in shifts:
@@ -909,21 +937,25 @@ class ORToolsProvider(BaseScheduleProvider):
                             continue
                         start_dt = self._shift_start_datetime(day_j, shift_b)
                         if start_dt <= end_dt:
-                            # shift_b starts before shift_a ends → handled by
-                            # the one-shift-per-day or same-shift constraints
-                            # elsewhere; skip.
                             continue
                         rest_h = (start_dt - end_dt).total_seconds() / 3600
                         if rest_h >= min_rest_hours:
                             continue
-                        # Forbid both cells being assigned to the same employee.
                         for emp in employees:
                             emp_id = emp['id']
-                            model.Add(
-                                assignments[emp_id][i][shift_a['id']]
-                                + assignments[emp_id][j][shift_b['id']]
-                                <= 1
-                            )
+                            a_var = assignments[emp_id][i][shift_a['id']]
+                            b_var = assignments[emp_id][j][shift_b['id']]
+                            if rest_soft:
+                                # both = 1 iff the employee takes both cells.
+                                both = model.NewBoolVar(
+                                    f'soft_rest_e{emp_id}_{i}_{shift_a["id"]}_{j}_{shift_b["id"]}'
+                                )
+                                model.Add(both >= a_var + b_var - 1)
+                                penalty_terms.append(self.SOFT_LABOR_WEIGHT * both)
+                            else:
+                                model.Add(a_var + b_var <= 1)
+
+        return penalty_terms
 
     @staticmethod
     def _shift_start_datetime(day: date, shift: Dict[str, Any]) -> datetime:

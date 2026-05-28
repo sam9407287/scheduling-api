@@ -2,7 +2,31 @@
 Compliance serializers
 """
 from rest_framework import serializers
-from .models import LaborLawRule, ComplianceCheck
+from .models import LaborLawRule, ComplianceCheck, OrgComplianceSettings
+
+
+# Rule keys the engine understands; the settings endpoint validates against this.
+VALID_RULE_TYPES = {
+    'max_weekly_hours', 'max_consecutive_days', 'min_rest_hours', 'max_daily_hours',
+}
+
+
+class OrgComplianceSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrgComplianceSettings
+        fields = ['id', 'organization', 'soft_rule_types', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'organization', 'created_at', 'updated_at']
+
+    def validate_soft_rule_types(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('soft_rule_types must be a list')
+        unknown = set(value) - VALID_RULE_TYPES
+        if unknown:
+            raise serializers.ValidationError(
+                f'unknown rule types: {sorted(unknown)}; '
+                f'valid: {sorted(VALID_RULE_TYPES)}'
+            )
+        return value
 
 
 class LaborLawRuleSerializer(serializers.ModelSerializer):
