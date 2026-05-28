@@ -141,6 +141,7 @@ DEFAULT_RULES = {
 def check_schedule_violations(
     schedule_version: ScheduleVersion,
     rules: Optional[Dict[str, Any]] = None,
+    soft_rule_types: Optional[Iterable[str]] = None,
 ) -> List[Violation]:
     """
     Pure function: scan one ScheduleVersion and return per-cell violations.
@@ -148,9 +149,15 @@ def check_schedule_violations(
     Does not write to the database; safe to call on every keystroke from the
     "一鍵檢查" button without polluting audit history. Use
     `ComplianceEngine.check_schedule_compliance` when persistence is needed.
+
+    `soft_rule_types` (PR11) labels matching violations with
+    `severity='soft'` so the frontend can render them as yellow reminders
+    rather than red blockers. Every violation is still returned regardless
+    of severity — the customer wants all labour-law hits shown.
     """
     if rules is None:
         rules = DEFAULT_RULES.copy()
+    soft = set(soft_rule_types or ())
 
     schedules = list(
         Schedule.objects
@@ -179,6 +186,13 @@ def check_schedule_violations(
         violations.extend(_check_daily_hours(
             employee, emp_schedules, rules.get('max_daily_hours', 8)
         ))
+
+    # Label severity in one pass: rules the org marked soft become 'soft',
+    # everything else stays 'hard'. All violations are returned either way.
+    if soft:
+        for v in violations:
+            if v.rule in soft:
+                v.severity = 'soft'
 
     return violations
 
