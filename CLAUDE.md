@@ -214,6 +214,7 @@ Three docs sit alongside this file:
 |---|---|---|
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Engineers, ops | You need the system topology, layered constraints, billing pipeline detail, or the deployment story |
 | [docs/BUSINESS_FLOWS.md](./docs/BUSINESS_FLOWS.md) (中文) | PM, sales, customer IT | You need the "why" — what does the customer actually do, what are the business rules, how does the consent / billing flow look from a user's perspective |
+| [docs/FEATURE_STATUS.md](./docs/FEATURE_STATUS.md) (中文) | New maintainers, PM, handoff | Feature maturity map: primary vs secondary vs **scaffolding-only (mock/hook for Phase 4)** vs not-built. Read this before demoing so you don't mistake a mock (PaymentMethod, console email) for a finished feature |
 | [docs/PHASE_1_FRONTEND_GUIDE.md](./docs/PHASE_1_FRONTEND_GUIDE.md), [PHASE_2](./docs/PHASE_2_FRONTEND_GUIDE.md) & [PHASE_3](./docs/PHASE_3_FRONTEND_GUIDE.md) | Frontend engineers | API contract reference per phase; request/response shapes, status codes, UX recommendations |
 | [docs/adr/ADR-0001-deployment-platform.md](./docs/adr/ADR-0001-deployment-platform.md) | Anyone touching deploy | Why Railway, what the trade-offs are |
 | [docs/deployment-plan.md](./docs/deployment-plan.md) | Anyone deploying | Step-by-step deploy sequence with security/observability checklists |
