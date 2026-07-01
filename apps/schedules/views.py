@@ -25,12 +25,19 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        
-        # Filter by organization
+
+        # Org isolation: non-superusers only ever see their own organization
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(organization=self.request.user.organization)
+            else:
+                queryset = queryset.none()
+
+        # Optional explicit organization filter (superuser cross-org view)
         org_id = self.request.query_params.get('organization')
         if org_id:
             queryset = queryset.filter(organization_id=org_id)
-        
+
         # Filter by version_type
         version_type = self.request.query_params.get('version_type')
         if version_type:
@@ -512,7 +519,14 @@ class ScheduleViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
+        # Org isolation: non-superusers only see schedules in their own organization
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(schedule_version__organization=self.request.user.organization)
+            else:
+                queryset = queryset.none()
+
         # Filter by schedule_version
         version_id = self.request.query_params.get('version')
         if version_id:
@@ -544,7 +558,14 @@ class ScheduleChangeViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
+        # Org isolation: non-superusers only see changes in their own organization
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(schedule__schedule_version__organization=self.request.user.organization)
+            else:
+                queryset = queryset.none()
+
         # Filter by schedule
         schedule_id = self.request.query_params.get('schedule')
         if schedule_id:

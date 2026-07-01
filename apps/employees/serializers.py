@@ -1,12 +1,17 @@
 """
 Employee serializers
 """
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from rest_framework import serializers
 from .models import (
     Employee, Contract, Certification, EmployeeAvailability, EmployeeTimeSlot,
     EmployeeTag, EmployeeDataConsent,
 )
+from apps.accounts.models import Role
 from apps.accounts.serializers import UserSerializer
+
+User = get_user_model()
 
 
 class EmployeeDataConsentSerializer(serializers.ModelSerializer):
@@ -57,7 +62,7 @@ class ContractSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
+    user = serializers.DictField(write_only=True, required=False)
     user_id = serializers.IntegerField(write_only=True, required=False)
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
@@ -81,6 +86,106 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'hire_date', 'is_active', 'contracts', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        user_data = attrs.get('user')
+        user_id = attrs.get('user_id')
+
+        if not self.instance and not user_data and not user_id:
+            raise serializers.ValidationError({
+                'user': 'User data or user_id is required.'
+            })
+
+        if user_data:
+            username = user_data.get('username')
+            password = user_data.get('password')
+            email = user_data.get('email')
+
+            if not username:
+                raise serializers.ValidationError({'user': {'username': 'This field is required.'}})
+            if not self.instance and not password:
+                raise serializers.ValidationError({'user': {'password': 'This field is required.'}})
+
+            username_qs = User.objects.filter(username=username)
+            email_qs = User.objects.filter(email=email) if email else User.objects.none()
+            if self.instance:
+                username_qs = username_qs.exclude(pk=self.instance.user_id)
+                email_qs = email_qs.exclude(pk=self.instance.user_id)
+            if username_qs.exists():
+                raise serializers.ValidationError({'user': {'username': 'A user with this username already exists.'}})
+            if email and email_qs.exists():
+                raise serializers.ValidationError({'user': {'email': 'A user with this email already exists.'}})
+
+        organization = attrs.get(
+            'organization',
+            self.instance.organization if self.instance else None,
+        )
+        branch = attrs.get(
+            'branch',
+            self.instance.branch if self.instance else None,
+        )
+        if organization and branch and branch.organization_id != organization.id:
+            raise serializers.ValidationError({
+                'branch': 'Branch must belong to the selected organization.'
+            })
+
+        return attrs
+
+    def create(self, validated_data):
+        user_data = validated_data.pop('user', None)
+        user_id = validated_data.pop('user_id', None)
+
+        with transaction.atomic():
+            if user_id:
+                user = User.objects.get(pk=user_id)
+            else:
+                password = user_data.pop('password')
+                role = Role.objects.filter(name='employee').first()
+                user = User(
+                    username=user_data.get('username'),
+                    email=user_data.get('email', ''),
+                    first_name=user_data.get('first_name', ''),
+                    last_name=user_data.get('last_name', ''),
+                    organization=validated_data.get('organization'),
+                    branch=validated_data.get('branch'),
+                    role=role,
+                    is_active=True,
+                )
+                user.set_password(password)
+                user.save()
+
+            employee = Employee.objects.create(user=user, **validated_data)
+
+        return employee
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop('user', None)
+        validated_data.pop('user_id', None)
+
+        with transaction.atomic():
+            if user_data:
+                password = user_data.pop('password', None)
+                for field in ('username', 'email', 'first_name', 'last_name'):
+                    if field in user_data:
+                        setattr(instance.user, field, user_data[field])
+                if 'organization' in validated_data:
+                    instance.user.organization = validated_data['organization']
+                if 'branch' in validated_data:
+                    instance.user.branch = validated_data['branch']
+                if password:
+                    instance.user.set_password(password)
+                instance.user.save()
+
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['user'] = UserSerializer(instance.user).data
+        return data
 
 
 class EmployeeTimeSlotSerializer(serializers.ModelSerializer):
@@ -145,6 +250,7 @@ class EmployeeAvailabilitySerializer(serializers.ModelSerializer):
 
 class EmployeeListSerializer(serializers.ModelSerializer):
     """Simplified serializer for list view"""
+    user = UserSerializer(read_only=True)
     user_name = serializers.CharField(source='user.get_full_name', read_only=True)
     user_email = serializers.CharField(source='user.email', read_only=True)
     organization_name = serializers.CharField(source='organization.name', read_only=True)
@@ -154,7 +260,8 @@ class EmployeeListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = [
-            'id', 'employee_id', 'user_name', 'user_email',
+            'id', 'employee_id', 'user', 'user_name', 'user_email',
+            'organization', 'branch',
             'organization_name', 'branch_name', 'position',
             'contract_type', 'is_active', 'certification_count', 'hire_date'
         ]

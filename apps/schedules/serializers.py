@@ -3,13 +3,15 @@ Schedule serializers
 """
 from rest_framework import serializers
 from .models import Schedule, ScheduleVersion, ScheduleChange
+from apps.employees.models import Employee
 from apps.employees.serializers import EmployeeListSerializer
+from apps.shifts.models import ShiftTemplate
 from apps.shifts.serializers import ShiftTemplateSerializer
 
 
 class ScheduleSerializer(serializers.ModelSerializer):
-    employee = EmployeeListSerializer(read_only=True)
-    shift_template = ShiftTemplateSerializer(read_only=True)
+    employee = serializers.PrimaryKeyRelatedField(queryset=Employee.objects.all())
+    shift_template = serializers.PrimaryKeyRelatedField(queryset=ShiftTemplate.objects.all())
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     
     class Meta:
@@ -20,6 +22,38 @@ class ScheduleSerializer(serializers.ModelSerializer):
             'notes', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        schedule_version = attrs.get(
+            'schedule_version',
+            self.instance.schedule_version if self.instance else None,
+        )
+        employee = attrs.get(
+            'employee',
+            self.instance.employee if self.instance else None,
+        )
+        shift_template = attrs.get(
+            'shift_template',
+            self.instance.shift_template if self.instance else None,
+        )
+
+        if schedule_version and employee and employee.organization_id != schedule_version.organization_id:
+            raise serializers.ValidationError({
+                'employee': 'Employee must belong to the schedule version organization.'
+            })
+
+        if schedule_version and shift_template and shift_template.organization_id != schedule_version.organization_id:
+            raise serializers.ValidationError({
+                'shift_template': 'Shift template must belong to the schedule version organization.'
+            })
+
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['employee'] = EmployeeListSerializer(instance.employee).data
+        data['shift_template'] = ShiftTemplateSerializer(instance.shift_template).data
+        return data
 
 
 class ScheduleVersionSerializer(serializers.ModelSerializer):
