@@ -10,12 +10,40 @@ Django 5 + DRF + Google OR-Tools (CP-SAT) + Celery + Postgres + Redis,
 deployed on Railway. Two phases of new feature work landed in May 2026
 (commits `99ce0ca` → `ecbf089`) — see §10 below for what each PR added.
 
-Three frontend buttons fan into one solver: full AI generate, AI gap-fill,
-and derive-legal (A from B). All three are metered (Phase 2). Phase 1 added
-the dual-schedule (legal A vs actual B) model, per-cell compliance
-violations, the drift objective for derive-legal, and the team-constraint
-compiler. Phase 2 added the REST CRUD around consent and team constraints,
-the metered billing primitives, and shift-pattern preferences.
+Product framing (updated 2026-07-10): the user works on **one roster** and
+can (a) hand-edit it — drag/drop, manual edits, live compliance check, Excel
+export; (b) press **AI auto-schedule** to let the solver fill it from
+preferences (then keep editing); (c) press **generate compliant version** to
+derive a minimally-changed labour-law-compliant copy to export/check. "A/B
+schedule" is just how we explain (b)/(c); see "Product concept" under §
+Schedule Versioning. Under the hood these are three modes of one solver:
+full AI generate, AI gap-fill, and derive-legal — all metered (Phase 2).
+Phase 1 added the dual-schedule (legal A vs actual B) storage model, per-cell
+compliance violations, the drift objective for derive-legal, and the
+team-constraint compiler. Phase 2 added the REST CRUD around consent and team
+constraints, the metered billing primitives, and shift-pattern preferences.
+
+### Frontend repo (separate)
+
+The frontend lives in a **separate sibling repo**, not in this one:
+`/Users/sam/Desktop/scheduling-frontend` (Vite + React + TypeScript +
+Tailwind, package name `scheduling-app`).
+
+Local run (both halves):
+
+```bash
+# Backend (this repo) — SQLite + Token auth, no Postgres/Redis needed for runserver
+venv/bin/python manage.py runserver 8000
+
+# Frontend (separate repo) — Vite dev server on :3000
+cd /Users/sam/Desktop/scheduling-frontend && npm run dev
+```
+
+The frontend calls `/api` and Vite proxies it to `http://localhost:8000`
+(see `vite.config.ts`; override with `VITE_PROXY_TARGET`). Open
+http://localhost:3000. Local dev login is `admin` / `admin123` via
+`POST /api/auth/login/` (Token auth, configured in
+`config/settings/development.py`).
 
 ## Commands
 
@@ -129,12 +157,24 @@ Each `Violation` is pinned to a single trigger cell `(employee_pk, schedule_date
 
 Cross-midnight rest intervals are calculated with `datetime.combine()` + subtraction. `min_rest_hours` is `float` so fractional caps (9.75 h) work. Legacy keys (`type`, `rest_hours`, …) coexist with the new per-cell keys on `ComplianceCheck.violations` for backward compatibility.
 
-### Schedule Versioning (dual track)
+### Product concept: one working roster + two AI actions (updated 2026-07-10)
 
-`ScheduleVersion` has a `version_type` (`legal` / `actual`) and a status workflow (`draft → published → approved → archived`).
+**"A/B schedule" is just explanatory language, not two roster entities the user juggles.** In product terms there is **one working roster** the user edits, plus three capabilities on top of it:
 
-- **B** = `actual` — real roster (may violate labour law). Source of truth.
-- **A** = `legal` — derived from B (`ScheduleVersion.derived_from` self FK, PR1). Always labour-law compliant.
+1. **Manual scheduling** — drag-and-drop, hand edits, live per-cell compliance check, Excel export. Always available; this is the roster the user actually works on.
+2. **AI auto-schedule** (button; backend = `full generate` / gap-fill) — let the solver fill the roster using preference/priority settings. After it runs, the user can still drag/edit/compliance-check freely. This is "the B roster, plus a let-AI-do-it button".
+3. **Generate compliant version** (button; backend = `derive-legal` drift mode) — from the *current* roster, force-produce a **minimally-changed labour-law-compliant** roster to export/compare in Excel. This is the "A" idea: same roster, one press → a compliant sibling.
+
+So A and B are not two independently-maintained versions; they are the same roster seen through "edit it / AI-fill it / derive a compliant copy". The **Excel export** is expected on both the working roster and the derived compliant version.
+
+### Schedule Versioning (backend mechanics)
+
+The concept above is still backed by `ScheduleVersion`, which has a `version_type` (`legal` / `actual`) and a status workflow (`draft → published → approved → archived`):
+
+- `actual` — the working roster the user edits (may violate labour law). Source of truth. (the "B" idea)
+- `legal` — a compliant roster derived from an `actual` one (`ScheduleVersion.derived_from` self FK, PR1). (the "A" idea — the derive-legal output)
+
+The three solver modes in the request table above map to the three product actions; the dual `version_type` is how a derived compliant copy is stored/compared against its source, not a mode the user must think in.
 
 The `approve` action uses an atomic `filter(status='draft').update(...)` to prevent race-condition double-approvals. The `compare` endpoint diffs two versions by `(employee_id, schedule_date, shift_template_id)` — the **cell-identity triple** used throughout the system.
 
