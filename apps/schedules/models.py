@@ -136,7 +136,11 @@ class Schedule(models.Model):
         unique_together = [
             ['schedule_version', 'employee', 'schedule_date', 'shift_template']
         ]
-        ordering = ['schedule_date', 'shift_template__start_time']
+        # 'id' is a deterministic tie-breaker: without it, rows sharing the
+        # same (schedule_date, shift_template start_time) have a non-unique
+        # order, so PageNumberPagination can drop/duplicate rows across page
+        # boundaries. See docs BACKEND_HANDOFF (frontend drag feature).
+        ordering = ['schedule_date', 'shift_template__start_time', 'id']
         indexes = [
             models.Index(fields=['schedule_date', 'employee']),
             models.Index(fields=['schedule_version', 'schedule_date']),
