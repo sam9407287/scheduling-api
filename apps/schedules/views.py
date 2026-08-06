@@ -1,17 +1,20 @@
 """
 Schedule views
 """
-from rest_framework import viewsets, status
+from rest_framework import mixins, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from .models import Schedule, ScheduleVersion, ScheduleChange
+from django.utils.dateparse import parse_date
+from .models import Schedule, ScheduleVersion, ScheduleChange, ScheduleCellAcknowledgment
 from .serializers import (
     ScheduleSerializer,
     ScheduleVersionSerializer,
-    ScheduleChangeSerializer
+    ScheduleChangeSerializer,
+    ScheduleCellAcknowledgmentSerializer
 )
+from . import summary as summary_module
 from apps.accounts.permissions import IsManager, IsSupervisor
 
 
@@ -200,6 +203,11 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             'min_rest_hours': 11,
             'max_consecutive_days': 6,
         }
+        # 優先序：預設 8 < org ShiftRule < request constraints
+        from apps.shifts.rules import resolve_max_daily_hours
+        org_daily_cap = resolve_max_daily_hours(b_version.organization_id)
+        if org_daily_cap is not None:
+            labor_law_defaults['max_daily_hours'] = org_daily_cap
         labor_law_defaults.update(constraints_override)
 
         # Soft labour-law rules (PR11): caller override else org config.
@@ -425,7 +433,68 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         version.refresh_from_db()
         serializer = self.get_serializer(version)
         return Response(serializer.data)
-    
+
+    @action(detail=True, methods=['post'])
+    def unapprove(self, request, pk=None):
+        """取消簽核：approved → draft，版本恢復可編輯。
+
+        不做期間重疊檢查——多個已簽核版本並存屬正常狀態。
+        """
+        from django.contrib.contenttypes.models import ContentType
+        from apps.audit.models import AuditLog
+
+        version = self.get_object()
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response(
+                {'error': 'reason is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        old_approved_by_id = version.approved_by_id
+        old_approved_at = version.approved_at
+
+        # 原子轉換：只在 approved 時才回 draft，避免並發重複取消
+        updated = ScheduleVersion.objects.filter(
+            pk=version.pk,
+            status='approved'
+        ).update(
+            status='draft',
+            approved_by=None,
+            approved_at=None
+        )
+
+        if not updated:
+            return Response(
+                {
+                    'code': 'unapprove_conflict',
+                    'error': 'Only approved versions can be unapproved.',
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # filter().update() 不觸發 post_save，稽核需手動落地（含取消原因）
+        AuditLog.objects.create(
+            user=request.user,
+            action='cancel',
+            model_name='ScheduleVersion',
+            record_id=version.pk,
+            content_type=ContentType.objects.get_for_model(ScheduleVersion),
+            object_id=version.pk,
+            old_data={
+                'status': 'approved',
+                'approved_by': old_approved_by_id,
+                'approved_at': old_approved_at.isoformat() if old_approved_at else None,
+            },
+            new_data={'status': 'draft', 'approved_by': None, 'approved_at': None},
+            changes={'reason': reason},
+        )
+
+        version.refresh_from_db()
+        serializer = self.get_serializer(version)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'])
     def create_dual_versions(self, request, pk=None):
         """建立雙軌版本（法規版和實際版）"""
@@ -508,15 +577,229 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             'differences': differences,
         })
 
+    def _resolve_org_id(self, request):
+        """Org isolation：非 superuser 一律鎖定自己的機構。
+
+        Superuser 可用 ?organization= 跨機構查詢，未指定時退回自己的機構。
+        """
+        if request.user.is_superuser:
+            org_id = request.query_params.get('organization')
+            if org_id:
+                return int(org_id)
+        return request.user.organization_id
+
+    # 註冊於 /api/schedules/approved-timeline/（見 urls.py，非 router action）
+    def approved_timeline(self, request):
+        """簽核總表彙總：所有 approved 版本的班次 + 跨版本差異格。
+
+        時間重疊的班次不是錯誤，一律完整回傳（志工班表等場景屬正常）。
+        """
+        org_id = self._resolve_org_id(request)
+        if not org_id:
+            return Response({'error': 'organization is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        version_type = request.query_params.get('version_type')
+        if version_type not in ('legal', 'actual'):
+            return Response(
+                {'error': 'version_type must be "legal" or "actual"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        date_from = parse_date(request.query_params.get('date_from') or '')
+        date_to = parse_date(request.query_params.get('date_to') or '')
+        if not date_from or not date_to or date_from > date_to:
+            return Response(
+                {'error': 'valid date_from and date_to are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if (date_to - date_from).days > 62:
+            return Response(
+                {'error': 'date range must not exceed 62 days'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        branch_id = request.query_params.get('branch')
+        versions, schedules, cells = summary_module.build_approved_timeline(
+            organization_id=org_id,
+            version_type=version_type,
+            date_from=date_from,
+            date_to=date_to,
+            branch_id=int(branch_id) if branch_id else None,
+        )
+
+        return Response({
+            'versions': ScheduleVersionSerializer(versions, many=True).data,
+            'schedules': ScheduleSerializer(schedules, many=True).data,
+            'cells': cells,
+        })
+
+    # 註冊於 /api/schedules/day-overview/（見 urls.py，非 router action）
+    def day_overview(self, request):
+        """某日在其他版本已存在的班次總覽（純資訊，不做衝突判斷）。"""
+        org_id = self._resolve_org_id(request)
+        if not org_id:
+            return Response({'error': 'organization is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        date = parse_date(request.query_params.get('date') or '')
+        if not date:
+            return Response({'error': 'valid date is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        schedules = Schedule.objects.filter(
+            schedule_version__organization_id=org_id,
+            schedule_date=date,
+        ).select_related('employee', 'shift_template', 'schedule_version', 'schedule_version__branch')
+
+        if request.query_params.get('include_archived', 'false').lower() != 'true':
+            schedules = schedules.exclude(schedule_version__status='archived')
+
+        exclude_version = request.query_params.get('exclude_version')
+        if exclude_version:
+            schedules = schedules.exclude(schedule_version_id=exclude_version)
+
+        employee_id = request.query_params.get('employee')
+        if employee_id:
+            schedules = schedules.filter(employee_id=employee_id)
+
+        by_version = {}
+        for s in schedules:
+            by_version.setdefault(s.schedule_version, []).append(s)
+
+        entries = [
+            {
+                'version': {
+                    'id': version.pk,
+                    'version_label': version.version_label,
+                    'version_type': version.version_type,
+                    'status': version.status,
+                    'branch': version.branch_id,
+                    'branch_name': version.branch.name if version.branch else None,
+                    'period_start': version.period_start.isoformat(),
+                    'period_end': version.period_end.isoformat(),
+                },
+                'schedules': ScheduleSerializer(rows, many=True).data,
+            }
+            for version, rows in sorted(by_version.items(), key=lambda kv: kv[0].pk)
+        ]
+        return Response({'date': date.isoformat(), 'entries': entries})
+
+
+class ScheduleCellAcknowledgmentViewSet(mixins.CreateModelMixin,
+                                        mixins.ListModelMixin,
+                                        viewsets.GenericViewSet):
+    """簽核總表差異認可：管理者按「都保留」後的持久化紀錄。"""
+    queryset = ScheduleCellAcknowledgment.objects.select_related('employee', 'acknowledged_by')
+    serializer_class = ScheduleCellAcknowledgmentSerializer
+    permission_classes = [IsSupervisor]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(organization=self.request.user.organization)
+            else:
+                queryset = queryset.none()
+
+        employee_id = self.request.query_params.get('employee')
+        if employee_id:
+            queryset = queryset.filter(employee_id=employee_id)
+        date_from = self.request.query_params.get('date_from')
+        if date_from:
+            queryset = queryset.filter(schedule_date__gte=date_from)
+        date_to = self.request.query_params.get('date_to')
+        if date_to:
+            queryset = queryset.filter(schedule_date__lte=date_to)
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        employee = serializer.validated_data['employee']
+        schedule_date = serializer.validated_data['schedule_date']
+        version_type = serializer.validated_data['version_type']
+        submitted_hash = serializer.validated_data['content_hash']
+
+        org = request.user.organization if not request.user.is_superuser else employee.organization
+        if not org or employee.organization_id != org.pk:
+            return Response(
+                {'error': 'Employee must belong to your organization.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 重算目前 hash：內容已變（或已無差異）就拒絕，逼前端刷新總表
+        current_hash, involved = summary_module.current_cell_state(
+            org.pk, version_type, employee, schedule_date
+        )
+        if current_hash != submitted_hash:
+            return Response(
+                {
+                    'code': 'discrepancy_changed',
+                    'error': 'Cell content changed; refresh the summary.',
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        ack, created = ScheduleCellAcknowledgment.objects.get_or_create(
+            organization=org,
+            employee=employee,
+            schedule_date=schedule_date,
+            version_type=version_type,
+            content_hash=submitted_hash,
+            defaults={'involved': involved, 'acknowledged_by': request.user},
+        )
+        response_serializer = self.get_serializer(ack)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        )
+
 
 class ScheduleViewSet(viewsets.ModelViewSet):
-    """排班管理"""
+    """排班管理
+
+    已簽核（非 draft）版本的班表唯讀：所有寫入動作回 409
+    `schedule_version_locked`，需先 unapprove 才能編輯。
+    """
     queryset = Schedule.objects.select_related('employee', 'shift_template', 'schedule_version')
     serializer_class = ScheduleSerializer
     permission_classes = [IsSupervisor]
     search_fields = ['employee__employee_id', 'employee__user__username']
     ordering_fields = ['schedule_date', 'created_at']
-    
+
+    LOCKED_RESPONSE = {
+        'code': 'schedule_version_locked',
+        'error': 'Approved schedule versions are read-only.',
+    }
+
+    def _target_version_locked(self, request):
+        """檢查 request body 指向的 schedule_version 是否非 draft（含 org isolation）。"""
+        version_id = request.data.get('schedule_version')
+        if not version_id:
+            return False
+        versions = ScheduleVersion.objects.all()
+        if not request.user.is_superuser:
+            versions = versions.filter(organization=request.user.organization)
+        version = versions.filter(pk=version_id).first()
+        return version is not None and version.status != 'draft'
+
+    def create(self, request, *args, **kwargs):
+        if self._target_version_locked(request):
+            return Response(self.LOCKED_RESPONSE, status=status.HTTP_409_CONFLICT)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # 現有版本或 body 想搬入的新版本任一非 draft 都鎖
+        if instance.schedule_version.status != 'draft' or self._target_version_locked(request):
+            return Response(self.LOCKED_RESPONSE, status=status.HTTP_409_CONFLICT)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.schedule_version.status != 'draft':
+            return Response(self.LOCKED_RESPONSE, status=status.HTTP_409_CONFLICT)
+        return super().destroy(request, *args, **kwargs)
+
     def get_queryset(self):
         queryset = super().get_queryset()
 

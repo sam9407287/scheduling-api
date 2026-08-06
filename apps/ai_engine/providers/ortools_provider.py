@@ -229,7 +229,15 @@ class ORToolsProvider(BaseScheduleProvider):
             by_employee.setdefault(emp_id, []).append(a)
 
         for emp_id, emp_assignments in by_employee.items():
-            sorted_a = sorted(emp_assignments, key=lambda x: x['date'])
+            # Sort by (date, start time) so multi-shift days keep intra-day
+            # order and the cross-day rest check pairs the true last/first shifts.
+            sorted_a = sorted(
+                emp_assignments,
+                key=lambda x: (
+                    str(x['date']),
+                    shift_map.get(x['shift_id'], {}).get('start_time', '00:00'),
+                ),
+            )
 
             # 每週工時
             weekly_hours: Dict[str, float] = {}
@@ -292,7 +300,8 @@ class ORToolsProvider(BaseScheduleProvider):
                         ),
                     })
 
-            # 休息間隔
+            # 休息間隔（只比不同工作日的相鄰班：同日拆班是合法的多班日，
+            # 不構成休息違規）
             if len(sorted_a) >= 2:
                 for i in range(len(sorted_a) - 1):
                     curr = sorted_a[i]
@@ -302,6 +311,9 @@ class ORToolsProvider(BaseScheduleProvider):
 
                     curr_date = date.fromisoformat(curr['date']) if isinstance(curr['date'], str) else curr['date']
                     nxt_date = date.fromisoformat(nxt['date']) if isinstance(nxt['date'], str) else nxt['date']
+
+                    if curr_date == nxt_date:
+                        continue
 
                     curr_end_dt = datetime.combine(
                         curr_date,
@@ -445,8 +457,9 @@ class ORToolsProvider(BaseScheduleProvider):
         入參為 'HH:MM' 字串。
         """
         def to_min(t_str: str) -> int:
-            h, m = map(int, t_str.split(':'))
-            return h * 60 + m
+            # Accept 'HH:MM' and 'HH:MM:SS' (DB TimeField str() gives seconds)
+            parts = str(t_str).split(':')
+            return int(parts[0]) * 60 + int(parts[1])
 
         s1, e1 = to_min(s1_str), to_min(e1_str)
         s2, e2 = to_min(s2_str), to_min(e2_str)
@@ -459,12 +472,13 @@ class ORToolsProvider(BaseScheduleProvider):
 
     def _shift_duration_hours(self, shift: Dict[str, Any]) -> float:
         """計算班別工時（小時）"""
-        start_str = shift.get('start_time', '00:00')
-        end_str = shift.get('end_time', '00:00')
+        start_str = str(shift.get('start_time', '00:00'))
+        end_str = str(shift.get('end_time', '00:00'))
         break_minutes = shift.get('break_minutes', 0)
         try:
-            start_t = datetime.strptime(start_str, '%H:%M').time()
-            end_t = datetime.strptime(end_str, '%H:%M').time()
+            # Accept 'HH:MM' and 'HH:MM:SS' (TimeField isoformat carries seconds)
+            start_t = datetime.strptime(start_str[:5], '%H:%M').time()
+            end_t = datetime.strptime(end_str[:5], '%H:%M').time()
         except ValueError:
             return 0.0
         ref = date.today()
@@ -504,11 +518,25 @@ class ORToolsProvider(BaseScheduleProvider):
                     sum(assignments[emp['id']][day_idx][shift_id] for emp in employees) >= min_staff
                 )
 
-        # 2. 每個員工每天最多排一個班別
+        # 2. 同員工同日允許多個班別（multi-shift），但時間重疊的兩班互斥
+        #    （AI 不主動產生重疊班；手動排班仍可重疊，鎖只在 solver）
+        overlapping_pairs = [
+            (a['id'], b['id'])
+            for i, a in enumerate(shifts)
+            for b in shifts[i + 1:]
+            if self._times_overlap(
+                a.get('start_time', '00:00'), a.get('end_time', '00:00'),
+                b.get('start_time', '00:00'), b.get('end_time', '00:00'),
+            )
+        ]
         for emp in employees:
             emp_id = emp['id']
             for day_idx in range(num_days):
-                model.Add(sum(assignments[emp_id][day_idx].values()) <= 1)
+                for shift_a, shift_b in overlapping_pairs:
+                    model.Add(
+                        assignments[emp_id][day_idx][shift_a]
+                        + assignments[emp_id][day_idx][shift_b] <= 1
+                    )
 
         # 3. 員工可用性（不可用日期禁止排班）
         for emp in employees:
@@ -785,12 +813,14 @@ class ORToolsProvider(BaseScheduleProvider):
                         y = model.NewBoolVar(
                             f'patt_alt_y_e{emp_id}_d{day_idx + 1}_b{bucket}'
                         )
-                        model.Add(
-                            x == sum(assignments[emp_id][day_idx][sid] for sid in sids)
-                        )
-                        model.Add(
-                            y == sum(assignments[emp_id][day_idx + 1][sid] for sid in sids)
-                        )
+                        # Reified link (not ==): with multi-shift the sum can
+                        # exceed 1, which would make a Bool equality infeasible.
+                        x_sum = sum(assignments[emp_id][day_idx][sid] for sid in sids)
+                        model.Add(x_sum >= 1).OnlyEnforceIf(x)
+                        model.Add(x_sum == 0).OnlyEnforceIf(x.Not())
+                        y_sum = sum(assignments[emp_id][day_idx + 1][sid] for sid in sids)
+                        model.Add(y_sum >= 1).OnlyEnforceIf(y)
+                        model.Add(y_sum == 0).OnlyEnforceIf(y.Not())
                         both = model.NewBoolVar(
                             f'patt_alt_both_e{emp_id}_d{day_idx}_b{bucket}'
                         )
@@ -807,11 +837,12 @@ class ORToolsProvider(BaseScheduleProvider):
                 daily_work = []
                 for day_idx in range(num_days):
                     dw = model.NewBoolVar(f'patt_dwork_e{emp_id}_d{day_idx}')
-                    model.Add(
-                        dw == sum(
-                            assignments[emp_id][day_idx][s['id']] for s in shifts
-                        )
+                    # Reified link (not ==): multi-shift days have sum > 1.
+                    day_sum = sum(
+                        assignments[emp_id][day_idx][s['id']] for s in shifts
                     )
+                    model.Add(day_sum >= 1).OnlyEnforceIf(dw)
+                    model.Add(day_sum == 0).OnlyEnforceIf(dw.Not())
                     daily_work.append(dw)
                 for day_idx in range(num_days - 1):
                     diff = model.NewBoolVar(
@@ -908,9 +939,12 @@ class ORToolsProvider(BaseScheduleProvider):
                 row = []
                 for day_idx in range(num_days):
                     dw = model.NewBoolVar(f'dwork_e{emp_id}_d{day_idx}')
-                    model.Add(dw == sum(
+                    # Reified link (not ==): multi-shift days have sum > 1.
+                    day_sum = sum(
                         assignments[emp_id][day_idx][s['id']] for s in shifts
-                    ))
+                    )
+                    model.Add(day_sum >= 1).OnlyEnforceIf(dw)
+                    model.Add(day_sum == 0).OnlyEnforceIf(dw.Not())
                     row.append(dw)
                 window = max_consec + 1
                 for start in range(num_days - window + 1):
@@ -926,15 +960,16 @@ class ORToolsProvider(BaseScheduleProvider):
                         model.Add(window_sum <= max_consec)
 
         # --- 3. minimum rest hours ---
+        # Same-day pairs are exempt: a split shift (e.g. 08-12 + 13-17) is a
+        # legitimate multi-shift day, not a rest violation. The rule only
+        # guards the gap between different working days.
         for i, day_i in enumerate(days):
             for j, day_j in enumerate(days):
-                if (day_j - day_i).days < 0 or (day_j - day_i).days > 2:
+                if (day_j - day_i).days < 1 or (day_j - day_i).days > 2:
                     continue
                 for shift_a in shifts:
                     end_dt = self._shift_end_datetime(day_i, shift_a)
                     for shift_b in shifts:
-                        if i == j and shift_a['id'] == shift_b['id']:
-                            continue
                         start_dt = self._shift_start_datetime(day_j, shift_b)
                         if start_dt <= end_dt:
                             continue
@@ -954,6 +989,28 @@ class ORToolsProvider(BaseScheduleProvider):
                                 penalty_terms.append(self.SOFT_LABOR_WEIGHT * both)
                             else:
                                 model.Add(a_var + b_var <= 1)
+
+        # --- 4. daily hours (multi-shift days must stay within the cap) ---
+        max_daily_minutes = int(round(
+            float(constraints.get('max_daily_hours', 8)) * 60
+        ))
+        daily_soft = 'max_daily_hours' in soft
+        for emp in employees:
+            emp_id = emp['id']
+            for day_idx in range(num_days):
+                day_minutes = sum(
+                    shift_minutes[s['id']] * assignments[emp_id][day_idx][s['id']]
+                    for s in shifts
+                )
+                if daily_soft:
+                    over = model.NewIntVar(
+                        0, sum(shift_minutes.values()) + 1,
+                        f'soft_daily_e{emp_id}_d{day_idx}',
+                    )
+                    model.Add(day_minutes - max_daily_minutes <= over)
+                    penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
+                else:
+                    model.Add(day_minutes <= max_daily_minutes)
 
         return penalty_terms
 

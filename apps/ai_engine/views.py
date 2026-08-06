@@ -304,6 +304,14 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         team_constraints = _load_team_constraints(org_id, branch_id)
 
+        # 優先序：solver 預設 8 < org ShiftRule < request constraints
+        from apps.shifts.rules import resolve_max_daily_hours
+        request_constraints = dict(data.get('constraints') or {})
+        if 'max_daily_hours' not in request_constraints:
+            org_daily_cap = resolve_max_daily_hours(org_id)
+            if org_daily_cap is not None:
+                request_constraints['max_daily_hours'] = org_daily_cap
+
         # Soft labour-law rules (PR11): caller override else org config.
         from apps.compliance.models import OrgComplianceSettings
         soft_labor_rules = data.get('soft_rule_types')
@@ -320,7 +328,7 @@ class AIEngineViewSet(viewsets.ViewSet):
             period_end=period_end,
             employees=employees,
             shift_templates=shifts,
-            constraints=data.get('constraints', {}),
+            constraints=request_constraints,
             preferences=data.get('preferences', {}),
             seed=seed,
             minimize_drift_from_seed=bool(data.get('minimize_drift_from_seed')),

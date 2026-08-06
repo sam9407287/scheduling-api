@@ -212,3 +212,51 @@ class ScheduleChange(models.Model):
 
     def __str__(self):
         return f"{self.get_change_type_display()} - {self.schedule} ({self.changed_at})"
+
+
+class ScheduleCellAcknowledgment(models.Model):
+    """簽核總表差異認可紀錄。
+
+    同一格（員工 × 日期 × 版本軌）在多個已簽核版本間內容不一致時，
+    管理者按「都保留」後留下的認可。content_hash 綁定認可當下的內容，
+    內容變動即產生新 hash，舊認可自然失效（歷史列保留作稽核軌跡）。
+    """
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='cell_acknowledgments',
+        verbose_name='所屬機構'
+    )
+    employee = models.ForeignKey(
+        'employees.Employee',
+        on_delete=models.CASCADE,
+        related_name='cell_acknowledgments',
+        verbose_name='員工'
+    )
+    schedule_date = models.DateField(verbose_name='排班日期')
+    version_type = models.CharField(
+        max_length=10,
+        choices=ScheduleVersion.VERSION_TYPE_CHOICES,
+        verbose_name='版本類型'
+    )
+    content_hash = models.CharField(max_length=64, db_index=True, verbose_name='內容雜湊')
+    involved = models.JSONField(verbose_name='認可當下的版本與班次快照')
+    acknowledged_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='cell_acknowledgments',
+        verbose_name='認可人'
+    )
+    acknowledged_at = models.DateTimeField(auto_now_add=True, verbose_name='認可時間')
+
+    class Meta:
+        verbose_name = '簽核總表差異認可'
+        verbose_name_plural = '簽核總表差異認可'
+        unique_together = [
+            ['organization', 'employee', 'schedule_date', 'version_type', 'content_hash']
+        ]
+        ordering = ['-acknowledged_at']
+
+    def __str__(self):
+        return f"{self.employee_id} {self.schedule_date} {self.version_type} {self.content_hash[:8]}"

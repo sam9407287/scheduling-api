@@ -178,6 +178,23 @@ PUT /api/shifts/templates/{id}/employee_priorities/
   { "employee": 17, "priority_rank": 2, "max_extra_shifts": null } ]
 ```
 
+Shift rule body (`rule_type` choices: `max_consecutive_days`,
+`min_rest_hours`, `max_weekly_hours`, `mandatory_rest_day`,
+`max_daily_hours`):
+```jsonc
+POST /api/shifts/rules/
+{ "organization": 1, "name": "每日工時上限",
+  "rule_type": "max_daily_hours", "value": { "max_hours": 10 }, "is_active": true }
+// value also accepts {"hours": n} / {"value": n} / bare number
+```
+An active `max_daily_hours` rule feeds the AI solver's daily-hours cap
+(precedence: solver default 8h < org rule < request `constraints`).
+
+**Multi-shift days**: the AI solver no longer limits one shift per employee
+per day. Same-day shifts are allowed when their times do not overlap; the
+daily total stays within `max_daily_hours` when labour law is enforced, and
+a same-day split shift does not count as a rest-interval violation.
+
 ### 3.1 Team constraint  (Notion-filter rule)
 
 ```jsonc
@@ -211,15 +228,34 @@ A `ScheduleVersion` is one roster; `version_type` is `actual` (B) or
 GET/POST  /api/schedules/versions/?organization=&version_type=&status=
 GET/PUT/PATCH/DELETE /api/schedules/versions/{id}/
 POST      /api/schedules/versions/{id}/approve/
+POST      /api/schedules/versions/{id}/unapprove/             // see §4.3
 GET       /api/schedules/versions/{id}/compare/?version2_id=<id>
 POST      /api/schedules/versions/{id}/create_dual_versions/
 POST      /api/schedules/versions/{id}/check-compliance/      // see §4.1
 POST      /api/schedules/versions/{B_id}/derive-legal/        // see §4.2
 
+GET       /api/schedules/approved-timeline/                    // see §4.4
+GET/POST  /api/schedules/cell-acknowledgments/                 // see §4.4
+GET       /api/schedules/day-overview/?date=                   // see §4.5
+
 GET/POST  /api/schedules/schedules/?version=&employee=&date_from=&date_to=
 GET/PUT/PATCH/DELETE /api/schedules/schedules/{id}/
 GET/POST  /api/schedules/changes/
 ```
+
+`ScheduleVersion.status`, `approved_by`, `approved_at` are **read-only** in
+PUT/PATCH — state only moves through `approve` / `unapprove`.
+
+**Approved-version lock**: while a version's status is not `draft`
+(approved/published/archived), every schedule write (POST/PUT/PATCH/DELETE
+on `/api/schedules/schedules/`) targeting it returns:
+
+```jsonc
+// 409
+{ "code": "schedule_version_locked", "error": "Approved schedule versions are read-only." }
+```
+
+Unapprove the version first to edit it.
 
 ScheduleVersion body:
 ```jsonc
@@ -287,6 +323,93 @@ POST /api/schedules/versions/{B_id}/derive-legal/
 // 402 if monthly cap exceeded / billing disabled
 // 409 if no legal schedule is possible (hard rules unsatisfiable)
 ```
+
+### 4.3 Unapprove  (approved → draft)
+
+```jsonc
+POST /api/schedules/versions/{id}/unapprove/
+{ "reason": "排班內容有誤" }        // required, non-blank
+
+// 200 → full ScheduleVersion body (status back to "draft",
+//        approved_by / approved_at cleared)
+// 400 { "error": "reason is required" }
+// 409 { "code": "unapprove_conflict", "error": "Only approved versions can be unapproved." }
+```
+
+The reason lands in the audit log. There is **no overlap check** on approve
+or unapprove — several approved versions covering the same period is a
+normal, supported state.
+
+### 4.4 Approval summary  (簽核總表)
+
+```jsonc
+GET /api/schedules/approved-timeline/
+    ?version_type=actual&date_from=2026-08-01&date_to=2026-08-31[&branch=3]
+// version_type/date_from/date_to required; range ≤ 62 days.
+
+// 200
+{
+  "versions":  [ /* full ScheduleVersion bodies (approved, overlapping range) */ ],
+  "schedules": [ /* full Schedule bodies of those versions in range */ ],
+  "cells": [            // ONLY cells whose content differs across versions
+    {
+      "employee_id": 12, "date": "2026-08-03",
+      "entries": [
+        { "schedule_id": 88, "version_id": 5, "version_label": "8月B",
+          "shift_template_id": 3, "shift_name": "早班",
+          "start_time": "08:00:00", "end_time": "16:00:00",
+          "expected_hours": "8.00", "notes": "" }
+      ],
+      "is_discrepant": true,
+      "content_hash": "3fa8…",          // sha256, stable while content unchanged
+      "acknowledged": false,             // true once a manager confirmed keep-all
+      "acknowledged_by": null,           // { "id", "username" } when acknowledged
+      "acknowledged_at": null
+    }
+  ]
+}
+```
+
+Overlapping shift **times are not errors** — entries are never filtered
+(volunteer/task rosters legitimately overlap the working roster). Render all
+entries in the cell.
+
+Manager confirms "keep all" for a discrepant cell:
+
+```jsonc
+POST /api/schedules/cell-acknowledgments/
+{ "employee": 12, "schedule_date": "2026-08-03",
+  "version_type": "actual", "content_hash": "3fa8…" }   // hash from the timeline cell
+
+// 201 (created) / 200 (already acknowledged, idempotent)
+// 409 { "code": "discrepancy_changed", "error": "Cell content changed; refresh the summary." }
+//     → re-fetch approved-timeline and re-prompt
+GET /api/schedules/cell-acknowledgments/?employee=&date_from=&date_to=   // audit listing
+```
+
+Any content change in the involved versions produces a new hash, so the
+confirm dialog re-appears for the changed cell.
+
+### 4.5 Day overview  (cross-version info for one date)
+
+```jsonc
+GET /api/schedules/day-overview/?date=2026-08-03[&employee=12][&exclude_version=42][&include_archived=true]
+
+// 200 — what other rosters already scheduled that day (informational only,
+//        no conflict detection; archived versions excluded by default)
+{
+  "date": "2026-08-03",
+  "entries": [
+    { "version": { "id": 5, "version_label": "8月B", "version_type": "actual",
+                   "status": "approved", "branch": 3, "branch_name": "北店",
+                   "period_start": "2026-08-01", "period_end": "2026-08-31" },
+      "schedules": [ /* full Schedule bodies */ ] }
+  ]
+}
+```
+
+Call it (typically with `exclude_version=<editing version>`) when adding a
+schedule so the manager sees that day's entries in other rosters.
 
 ---
 

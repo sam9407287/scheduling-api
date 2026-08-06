@@ -76,6 +76,7 @@ class ShiftRule(models.Model):
             ('min_rest_hours', '最小休息時數'),
             ('max_weekly_hours', '最大每週工時'),
             ('mandatory_rest_day', '強制休息日'),
+            ('max_daily_hours', '每日最大工時'),
         ],
         verbose_name='規則類型'
     )

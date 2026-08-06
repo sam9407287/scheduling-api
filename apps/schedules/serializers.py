@@ -2,7 +2,7 @@
 Schedule serializers
 """
 from rest_framework import serializers
-from .models import Schedule, ScheduleVersion, ScheduleChange
+from .models import Schedule, ScheduleVersion, ScheduleChange, ScheduleCellAcknowledgment
 from apps.employees.models import Employee
 from apps.employees.serializers import EmployeeListSerializer
 from apps.shifts.models import ShiftTemplate
@@ -72,7 +72,26 @@ class ScheduleVersionSerializer(serializers.ModelSerializer):
             'approved_by', 'approved_at', 'created_by', 'schedule_count',
             'derived_from', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        # status/approved_* 只能經 approve/unapprove action 變更，防止 PATCH 繞過狀態機
+        read_only_fields = ['id', 'status', 'approved_by', 'approved_at', 'created_at', 'updated_at']
+
+
+class ScheduleCellAcknowledgmentSerializer(serializers.ModelSerializer):
+    acknowledged_by_name = serializers.CharField(
+        source='acknowledged_by.username', read_only=True
+    )
+
+    class Meta:
+        model = ScheduleCellAcknowledgment
+        fields = [
+            'id', 'organization', 'employee', 'schedule_date', 'version_type',
+            'content_hash', 'involved', 'acknowledged_by', 'acknowledged_by_name',
+            'acknowledged_at'
+        ]
+        # organization/involved/acknowledged_* 由後端自產，client 只提供格子識別與 hash
+        read_only_fields = [
+            'id', 'organization', 'involved', 'acknowledged_by', 'acknowledged_at'
+        ]
 
 
 class ScheduleChangeSerializer(serializers.ModelSerializer):
