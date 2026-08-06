@@ -270,6 +270,12 @@ Schedule (cell) body:
   "schedule_date": "2026-06-05", "expected_hours": "8.00", "status": "draft", "notes": "" }
 ```
 
+**No time restrictions** (2026-08-07): `schedule_date` is NOT validated
+against the version's `period_start`/`period_end` — schedules can be added
+or removed on any date. The period is display metadata (default view range),
+nothing more. Use §4.5 day-overview to show what other rosters already have
+on a date.
+
 ### 4.1 One-click compliance check  (free, no DB write)
 
 ```jsonc
@@ -349,9 +355,14 @@ GET /api/schedules/approved-timeline/
 
 // 200
 {
-  "versions":  [ /* full ScheduleVersion bodies (approved, overlapping range) */ ],
+  "versions":  [ /* approved versions whose period overlaps the range OR
+                    that have schedules in the range (out-of-period
+                    schedules stay visible) */ ],
   "schedules": [ /* full Schedule bodies of those versions in range */ ],
-  "cells": [            // ONLY cells whose content differs across versions
+  "cells": [            // ONLY cells where ≥2 versions scheduled the same
+                        // employee+date with DIFFERING content. A version
+                        // that simply has no entry there is not a
+                        // discrepancy (one-sided cells never appear).
     {
       "employee_id": 12, "date": "2026-08-03",
       "entries": [

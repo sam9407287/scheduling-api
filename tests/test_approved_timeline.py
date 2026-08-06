@@ -191,6 +191,60 @@ class TestApprovedTimeline:
         assert all(v['organization'] != other_org.pk for v in response.data['versions'])
 
 
+class TestNoTimeRestrictions:
+    """2026-08-07 起：班表沒有時間限制——version period 只是顯示用資料。"""
+
+    def test_create_schedule_outside_version_period(self, admin_api_client, organization,
+                                                    admin_user, employee, morning):
+        """schedule_date 落在版本期間外也能建立（任何時間增減班表）。"""
+        version = ScheduleVersion.objects.create(
+            organization=organization, version_label='Sep', version_type='actual',
+            period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+            created_by=admin_user,
+        )
+        response = admin_api_client.post('/api/schedules/schedules/', {
+            'schedule_version': version.pk, 'employee': employee.pk,
+            'shift_template': morning.pk, 'schedule_date': '2026-12-25',
+            'expected_hours': '8.00', 'status': 'assigned',
+        }, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+
+    def test_timeline_includes_out_of_period_schedules(self, admin_api_client, organization,
+                                                       admin_user, employee, morning, evening):
+        """版本期間在 9 月、班次排在 8 月：總表查 8 月仍要看得到並偵測差異。"""
+        v_sep_1 = ScheduleVersion.objects.create(
+            organization=organization, version_label='Sep1', version_type='actual',
+            period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+            created_by=admin_user,
+        )
+        v_sep_2 = ScheduleVersion.objects.create(
+            organization=organization, version_label='Sep2', version_type='actual',
+            period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+            created_by=admin_user,
+        )
+        ScheduleVersion.objects.filter(pk__in=[v_sep_1.pk, v_sep_2.pk]).update(status='approved')
+        _schedule(v_sep_1, employee, morning)   # DAY = 2026-08-03，期間外
+        _schedule(v_sep_2, employee, evening)
+
+        response = admin_api_client.get(TIMELINE_URL)
+        assert {v['id'] for v in response.data['versions']} == {v_sep_1.pk, v_sep_2.pk}
+        assert len(response.data['schedules']) == 2
+        assert len(response.data['cells']) == 1
+        assert response.data['cells'][0]['is_discrepant'] is True
+
+    def test_one_sided_cell_is_not_discrepant(self, admin_api_client, organization,
+                                              admin_user, employee, morning):
+        """另一版本沒排該員工該日 ≠ 差異——只有「內容不同」才算 discrepancy。"""
+        v1 = _approved_version(organization, admin_user, 'A')
+        _approved_version(organization, admin_user, 'B')  # 覆蓋同期間但沒排班
+        _schedule(v1, employee, morning)
+
+        response = admin_api_client.get(TIMELINE_URL)
+        assert len(response.data['versions']) == 2
+        assert response.data['cells'] == []
+        assert len(response.data['schedules']) == 1
+
+
 class TestCellAcknowledgment:
     def _make_discrepancy(self, admin_api_client, organization, admin_user,
                           employee, shift_a, shift_b):

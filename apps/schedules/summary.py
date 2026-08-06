@@ -7,20 +7,22 @@ approved versions, the cell is flagged as a discrepancy so the frontend can
 ask the manager to confirm keeping all entries. Overlapping shift times are
 NEVER treated as errors — future rosters (e.g. volunteer task rosters)
 legitimately overlap the working-time roster.
+
+There are NO time restrictions (2026-08-07): schedules may live on any date,
+including outside their version's period_start/period_end — the period is
+display metadata only. Everything here is therefore driven by the schedules
+that actually exist, never by period coverage:
+  - a version participates in the timeline if it has schedules in the range
+    (or its period overlaps, so empty-but-relevant versions still show);
+  - a version participates in a CELL only through its own entries there.
+    A version that simply doesn't schedule that employee that day is not a
+    discrepancy — only differing entries are.
 """
 import hashlib
 
 from django.db.models import Q
 
 from .models import Schedule, ScheduleCellAcknowledgment, ScheduleVersion
-
-
-def _version_applies_to_employee(version, employee):
-    """Version with no branch applies to every employee; otherwise branches must match.
-
-    Mirrors the frontend's current logic in ApprovalScheduleSummaryPage.
-    """
-    return version.branch_id is None or version.branch_id == employee.branch_id
 
 
 def _cell_signature(entries):
@@ -55,7 +57,8 @@ def build_approved_timeline(organization_id, version_type, date_from, date_to, b
     """Build the approval-summary payload.
 
     Returns (versions, schedules, cells):
-      - versions: approved ScheduleVersion queryset overlapping the range
+      - versions: approved versions whose period overlaps the range OR that
+        have schedules in the range (out-of-period schedules stay visible)
       - schedules: Schedule queryset of those versions within the range
       - cells: list of discrepant-cell dicts (entries never filtered)
     """
@@ -63,9 +66,11 @@ def build_approved_timeline(organization_id, version_type, date_from, date_to, b
         organization_id=organization_id,
         version_type=version_type,
         status='approved',
-        period_start__lte=date_to,
-        period_end__gte=date_from,
-    ).select_related('organization', 'branch', 'approved_by', 'created_by')
+    ).filter(
+        Q(period_start__lte=date_to, period_end__gte=date_from)
+        | Q(schedules__schedule_date__gte=date_from,
+            schedules__schedule_date__lte=date_to)
+    ).distinct().select_related('organization', 'branch', 'approved_by', 'created_by')
     if branch_id is not None:
         versions = versions.filter(Q(branch__isnull=True) | Q(branch_id=branch_id))
 
@@ -82,42 +87,31 @@ def build_approved_timeline(organization_id, version_type, date_from, date_to, b
 
     # (employee_id, date) -> {version_id: [Schedule, ...]}
     cells = {}
-    employees = {}
     for s in schedule_list:
         key = (s.employee_id, s.schedule_date)
         cells.setdefault(key, {}).setdefault(s.schedule_version_id, []).append(s)
-        employees[s.employee_id] = s.employee
 
     discrepant_cells = []
     for (employee_id, date), entries_by_version in cells.items():
-        employee = employees[employee_id]
-
-        # Versions covering this date and applicable to this employee.
-        covering = [
-            v for v in version_list
-            if v.period_start <= date <= v.period_end
-            and _version_applies_to_employee(v, employee)
-        ]
-        if len(covering) < 2:
+        # A version participates in a cell only through its own entries:
+        # "didn't schedule this employee that day" is not a discrepancy.
+        participants = [version_by_id[vid] for vid in entries_by_version]
+        if len(participants) < 2:
             continue
 
-        # Signature per covering version; a covering version with no entries
-        # in this cell contributes the empty signature.
         signatures = {
-            _cell_signature(entries_by_version.get(v.pk, []))
-            for v in covering
+            _cell_signature(entries) for entries in entries_by_version.values()
         }
         if len(signatures) < 2:
             continue
 
-        hash_input = {
-            v.pk: entries_by_version.get(v.pk, []) for v in covering
-        }
-        content_hash = compute_cell_hash(employee_id, date, version_type, hash_input)
+        content_hash = compute_cell_hash(
+            employee_id, date, version_type, entries_by_version
+        )
 
         entries = []
-        for v in sorted(covering, key=lambda v: v.pk):
-            for s in sorted(entries_by_version.get(v.pk, []), key=lambda s: s.shift_template_id):
+        for v in sorted(participants, key=lambda v: v.pk):
+            for s in sorted(entries_by_version[v.pk], key=lambda s: s.shift_template_id):
                 entries.append({
                     'schedule_id': s.pk,
                     'version_id': v.pk,
@@ -177,25 +171,23 @@ def current_cell_state(organization_id, version_type, employee, date):
     Returns (content_hash, involved_snapshot), or (None, None) when the cell
     is not currently discrepant.
     """
-    versions = list(ScheduleVersion.objects.filter(
-        organization_id=organization_id,
-        version_type=version_type,
-        status='approved',
-        period_start__lte=date,
-        period_end__gte=date,
-    ))
-    covering = [v for v in versions if _version_applies_to_employee(v, employee)]
-    if len(covering) < 2:
-        return None, None
-
+    # Participation is entries-based (no period coverage — schedules may live
+    # on any date): only approved versions with entries in this cell count.
     entries = Schedule.objects.filter(
-        schedule_version__in=covering,
+        schedule_version__organization_id=organization_id,
+        schedule_version__version_type=version_type,
+        schedule_version__status='approved',
         employee=employee,
         schedule_date=date,
-    ).select_related('shift_template')
-    entries_by_version = {v.pk: [] for v in covering}
+    ).select_related('shift_template', 'schedule_version')
+
+    entries_by_version = {}
+    participants = {}
     for s in entries:
-        entries_by_version[s.schedule_version_id].append(s)
+        entries_by_version.setdefault(s.schedule_version_id, []).append(s)
+        participants[s.schedule_version_id] = s.schedule_version
+    if len(participants) < 2:
+        return None, None
 
     signatures = {_cell_signature(e) for e in entries_by_version.values()}
     if len(signatures) < 2:
@@ -216,6 +208,6 @@ def current_cell_state(organization_id, version_type, employee, date):
                 for s in sorted(entries_by_version[v.pk], key=lambda s: s.shift_template_id)
             ],
         }
-        for v in sorted(covering, key=lambda v: v.pk)
+        for v in sorted(participants.values(), key=lambda v: v.pk)
     ]
     return content_hash, involved
