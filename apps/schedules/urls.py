@@ -7,7 +7,7 @@ from .views import (
     ScheduleViewSet,
     ScheduleVersionViewSet,
     ScheduleChangeViewSet,
-    ScheduleCellAcknowledgmentViewSet,
+    ScheduleOverlapDecisionViewSet,
 )
 
 router = DefaultRouter()
@@ -15,14 +15,15 @@ router.register(r'versions', ScheduleVersionViewSet, basename='schedule-version'
 router.register(r'schedules', ScheduleViewSet, basename='schedule')
 router.register(r'changes', ScheduleChangeViewSet, basename='schedule-change')
 router.register(
-    r'cell-acknowledgments',
-    ScheduleCellAcknowledgmentViewSet,
-    basename='cell-acknowledgment',
+    r'overlap-decisions',
+    ScheduleOverlapDecisionViewSet,
+    basename='overlap-decision',
 )
 
 urlpatterns = [
+    # 手動 path 需在 router 之前，避免被 versions/{pk}/ 吃掉
     path(
-        'approved-timeline/',
+        'versions/approved-timeline/',
         ScheduleVersionViewSet.as_view({'get': 'approved_timeline'}),
         name='approved-timeline',
     ),

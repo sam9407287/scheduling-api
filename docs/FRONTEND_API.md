@@ -234,8 +234,8 @@ POST      /api/schedules/versions/{id}/create_dual_versions/
 POST      /api/schedules/versions/{id}/check-compliance/      // see §4.1
 POST      /api/schedules/versions/{B_id}/derive-legal/        // see §4.2
 
-GET       /api/schedules/approved-timeline/                    // see §4.4
-GET/POST  /api/schedules/cell-acknowledgments/                 // see §4.4
+GET       /api/schedules/versions/approved-timeline/           // see §4.4
+GET/POST  /api/schedules/overlap-decisions/                    // see §4.4
 GET       /api/schedules/day-overview/?date=                   // see §4.5
 
 GET/POST  /api/schedules/schedules/?version=&employee=&date_from=&date_to=
@@ -257,12 +257,18 @@ on `/api/schedules/schedules/`) targeting it returns:
 
 Unapprove the version first to edit it.
 
-ScheduleVersion body:
+ScheduleVersion body (period fields are READ-ONLY — do not send them):
 ```jsonc
 { "organization": 1, "branch": 3, "version_label": "2026-06",
-  "version_type": "actual", "period_start": "2026-06-01", "period_end": "2026-06-30" }
-// response adds: status, derived_from, schedule_count, *_display
+  "version_type": "actual" }
+// response adds: status, period_start, period_end, derived_from,
+//                schedule_count, *_display
 ```
+
+`period_start`/`period_end` are the backend-maintained data-coverage range:
+initialised to the server's today on create, auto-EXPANDED (never shrunk)
+whenever a schedule is created/updated outside the current range. They are
+not a scheduling restriction — any date can be scheduled at any time.
 
 Schedule (cell) body:
 ```jsonc
@@ -346,60 +352,65 @@ The reason lands in the audit log. There is **no overlap check** on approve
 or unapprove — several approved versions covering the same period is a
 normal, supported state.
 
-### 4.4 Approval summary  (簽核總表)
+### 4.4 Approval summary  (簽核總表: conflicts + overlap decisions)
 
 ```jsonc
-GET /api/schedules/approved-timeline/
-    ?version_type=actual&date_from=2026-08-01&date_to=2026-08-31[&branch=3]
+GET /api/schedules/versions/approved-timeline/
+    ?organization=1&version_type=actual&date_from=2026-08-01&date_to=2026-08-31[&branch=3|all]
 // version_type/date_from/date_to required; range ≤ 62 days.
+// branch filters by the EMPLOYEE's current branch (not the version's).
 
 // 200
 {
-  "versions":  [ /* approved versions whose period overlaps the range OR
-                    that have schedules in the range (out-of-period
-                    schedules stay visible) */ ],
-  "schedules": [ /* full Schedule bodies of those versions in range */ ],
-  "cells": [            // ONLY cells where ≥2 versions scheduled the same
-                        // employee+date with DIFFERING content. A version
-                        // that simply has no entry there is not a
-                        // discrepancy (one-sided cells never appear).
+  "versions":  [ /* approved versions (period overlaps range OR has
+                    schedules in range — out-of-period schedules visible) */ ],
+  "schedules": [ /* Schedule bodies in range, plus previous-day
+                    cross-midnight shifts bleeding into the range */ ],
+  "conflicts": [   // cross-version TIME-intersection groups per employee.
+                   // Same-version combine is never a conflict; versions of
+                   // different branches still conflict (one person, one body).
     {
-      "employee_id": 12, "date": "2026-08-03",
-      "entries": [
-        { "schedule_id": 88, "version_id": 5, "version_label": "8月B",
-          "shift_template_id": 3, "shift_name": "早班",
-          "start_time": "08:00:00", "end_time": "16:00:00",
-          "expected_hours": "8.00", "notes": "" }
-      ],
-      "is_discrepant": true,
-      "content_hash": "3fa8…",          // sha256, stable while content unchanged
-      "acknowledged": false,             // true once a manager confirmed keep-all
-      "acknowledged_by": null,           // { "id", "username" } when acknowledged
-      "acknowledged_at": null
+      "conflict_key": "9d41…",          // from member ids + updated_at:
+                                         // any member edit → new key
+      "starts_at": "2026-08-03T08:00:00",
+      "ends_at": "2026-08-03T16:00:00",
+      "employee_id": 12,
+      "schedule_ids": [101, 205],
+      "schedules": [ /* full Schedule bodies of the group */ ],
+      "decision": null                   // or the stored decision (below)
     }
-  ]
+  ],
+  "unresolved_conflict_count": 1
 }
 ```
 
-Overlapping shift **times are not errors** — entries are never filtered
-(volunteer/task rosters legitimately overlap the working roster). Render all
-entries in the cell.
-
-Manager confirms "keep all" for a discrepant cell:
+Overlaps are informational — nothing blocks saving or approving. The manager
+resolves each group:
 
 ```jsonc
-POST /api/schedules/cell-acknowledgments/
-{ "employee": 12, "schedule_date": "2026-08-03",
-  "version_type": "actual", "content_hash": "3fa8…" }   // hash from the timeline cell
+POST /api/schedules/overlap-decisions/
+{ "conflict_key": "9d41…", "schedule_ids": [101, 205],
+  "decision": "select",                  // keep a subset…
+  "selected_schedule_ids": [101],        // …which must not overlap each other
+  "comment": "" }
+// or
+{ "conflict_key": "9d41…", "schedule_ids": [101, 205],
+  "decision": "coexist",                 // keep all
+  "selected_schedule_ids": [101, 205],
+  "comment": "支援性重疊，主管確認" }      // REQUIRED for coexist
 
-// 201 (created) / 200 (already acknowledged, idempotent)
-// 409 { "code": "discrepancy_changed", "error": "Cell content changed; refresh the summary." }
-//     → re-fetch approved-timeline and re-prompt
-GET /api/schedules/cell-acknowledgments/?employee=&date_from=&date_to=   // audit listing
+// 201 created / 200 same conflict_key re-submitted (updates the decision)
+// 400 invalid selection (empty, outside group, or overlapping picks) /
+//     missing coexist comment
+// 409 { "code": "conflict_changed", ... } — the group changed since the
+//     timeline was fetched; re-fetch and re-prompt
+GET /api/schedules/overlap-decisions/?employee=&date_from=&date_to=   // audit listing
 ```
 
-Any content change in the involved versions produces a new hash, so the
-confirm dialog re-appears for the changed cell.
+Response decision body: `{ id, conflict_key, organization, branch,
+version_type, employee, schedule_date, schedule_ids, decision,
+selected_schedule_ids, comment, decided_by, decided_by_name, decided_at,
+created_at }`.
 
 ### 4.5 Day overview  (cross-version info for one date)
 

@@ -214,49 +214,68 @@ class ScheduleChange(models.Model):
         return f"{self.get_change_type_display()} - {self.schedule} ({self.changed_at})"
 
 
-class ScheduleCellAcknowledgment(models.Model):
-    """簽核總表差異認可紀錄。
+class ScheduleOverlapDecision(models.Model):
+    """簽核總表的跨版本重疊裁決。
 
-    同一格（員工 × 日期 × 版本軌）在多個已簽核版本間內容不一致時，
-    管理者按「都保留」後留下的認可。content_hash 綁定認可當下的內容，
-    內容變動即產生新 hash，舊認可自然失效（歷史列保留作稽核軌跡）。
+    衝突群組 = 同員工、同軌、不同已簽核版本、實際時間相交的班次集合。
+    conflict_key 由群組班次的 id + updated_at 產生：任何班次異動都會改變
+    key，舊裁決自然失效不會誤套。同一 key 重複送出會更新原裁決。
     """
+    DECISION_CHOICES = [
+        ('select', '保留指定班次'),
+        ('coexist', '允許並存'),
+    ]
+
     organization = models.ForeignKey(
         'organizations.Organization',
         on_delete=models.CASCADE,
-        related_name='cell_acknowledgments',
+        related_name='overlap_decisions',
         verbose_name='所屬機構'
     )
-    employee = models.ForeignKey(
-        'employees.Employee',
-        on_delete=models.CASCADE,
-        related_name='cell_acknowledgments',
-        verbose_name='員工'
+    branch = models.ForeignKey(
+        'organizations.Branch',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='overlap_decisions',
+        verbose_name='員工分店'
     )
-    schedule_date = models.DateField(verbose_name='排班日期')
     version_type = models.CharField(
         max_length=10,
         choices=ScheduleVersion.VERSION_TYPE_CHOICES,
         verbose_name='版本類型'
     )
-    content_hash = models.CharField(max_length=64, db_index=True, verbose_name='內容雜湊')
-    involved = models.JSONField(verbose_name='認可當下的版本與班次快照')
-    acknowledged_by = models.ForeignKey(
+    employee = models.ForeignKey(
+        'employees.Employee',
+        on_delete=models.CASCADE,
+        related_name='overlap_decisions',
+        verbose_name='員工'
+    )
+    schedule_date = models.DateField(verbose_name='群組起始日期')
+    conflict_key = models.CharField(max_length=64, db_index=True, verbose_name='衝突鍵')
+    schedule_ids = models.JSONField(verbose_name='群組班次 ID')
+    decision = models.CharField(
+        max_length=10,
+        choices=DECISION_CHOICES,
+        verbose_name='裁決'
+    )
+    selected_schedule_ids = models.JSONField(verbose_name='保留班次 ID')
+    comment = models.TextField(blank=True, verbose_name='備註')
+    decided_by = models.ForeignKey(
         'accounts.User',
         on_delete=models.SET_NULL,
         null=True,
-        related_name='cell_acknowledgments',
-        verbose_name='認可人'
+        related_name='overlap_decisions',
+        verbose_name='裁決人'
     )
-    acknowledged_at = models.DateTimeField(auto_now_add=True, verbose_name='認可時間')
+    decided_at = models.DateTimeField(auto_now=True, verbose_name='裁決時間')
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = '簽核總表差異認可'
-        verbose_name_plural = '簽核總表差異認可'
-        unique_together = [
-            ['organization', 'employee', 'schedule_date', 'version_type', 'content_hash']
-        ]
-        ordering = ['-acknowledged_at']
+        verbose_name = '重疊裁決'
+        verbose_name_plural = '重疊裁決'
+        unique_together = [['organization', 'conflict_key']]
+        ordering = ['-decided_at']
 
     def __str__(self):
-        return f"{self.employee_id} {self.schedule_date} {self.version_type} {self.content_hash[:8]}"
+        return f"{self.conflict_key[:8]} {self.get_decision_display()}"

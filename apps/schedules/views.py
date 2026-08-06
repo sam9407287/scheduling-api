@@ -7,14 +7,14 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
 from django.utils.dateparse import parse_date
-from .models import Schedule, ScheduleVersion, ScheduleChange, ScheduleCellAcknowledgment
+from .models import Schedule, ScheduleVersion, ScheduleChange, ScheduleOverlapDecision
 from .serializers import (
     ScheduleSerializer,
     ScheduleVersionSerializer,
     ScheduleChangeSerializer,
-    ScheduleCellAcknowledgmentSerializer
+    ScheduleOverlapDecisionSerializer
 )
-from . import summary as summary_module
+from . import overlaps as overlaps_module
 from apps.accounts.permissions import IsManager, IsSupervisor
 
 
@@ -588,11 +588,12 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 return int(org_id)
         return request.user.organization_id
 
-    # 註冊於 /api/schedules/approved-timeline/（見 urls.py，非 router action）
+    # 註冊於 /api/schedules/versions/approved-timeline/（見 urls.py，非 router action）
     def approved_timeline(self, request):
-        """簽核總表彙總：所有 approved 版本的班次 + 跨版本差異格。
+        """簽核總表：approved 版本、範圍內班次、跨版本時間重疊群組與既有裁決。
 
-        時間重疊的班次不是錯誤，一律完整回傳（志工班表等場景屬正常）。
+        重疊只是資訊，不阻擋任何操作；同版本內的 combine 不算衝突，
+        版本分店不同仍算（同一人不能同時在兩處上班）。
         """
         org_id = self._resolve_org_id(request)
         if not org_id:
@@ -618,19 +619,48 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        branch_id = request.query_params.get('branch')
-        versions, schedules, cells = summary_module.build_approved_timeline(
-            organization_id=org_id,
-            version_type=version_type,
-            date_from=date_from,
-            date_to=date_to,
-            branch_id=int(branch_id) if branch_id else None,
+        branch_param = request.query_params.get('branch')
+        branch_id = int(branch_param) if branch_param and branch_param != 'all' else None
+
+        schedules = overlaps_module.timeline_schedules(
+            org_id, version_type, date_from, date_to, branch_id=branch_id,
+        )
+        conflicts = overlaps_module.annotate_decisions(
+            overlaps_module.build_conflicts(schedules), org_id,
         )
 
+        version_ids = {s.schedule_version_id for s in schedules}
+        versions = ScheduleVersion.objects.filter(
+            organization_id=org_id,
+            version_type=version_type,
+            status='approved',
+        ).filter(
+            Q(period_start__lte=date_to, period_end__gte=date_from)
+            | Q(pk__in=version_ids)
+        ).distinct().select_related('organization', 'branch', 'approved_by', 'created_by')
+
+        conflict_payload = [
+            {
+                'conflict_key': c['conflict_key'],
+                'starts_at': c['starts_at'],
+                'ends_at': c['ends_at'],
+                'employee_id': c['employee_id'],
+                'schedule_ids': c['schedule_ids'],
+                'schedules': ScheduleSerializer(c['schedules'], many=True).data,
+                'decision': (
+                    ScheduleOverlapDecisionSerializer(c['decision']).data
+                    if c['decision'] else None
+                ),
+            }
+            for c in conflicts
+        ]
         return Response({
             'versions': ScheduleVersionSerializer(versions, many=True).data,
             'schedules': ScheduleSerializer(schedules, many=True).data,
-            'cells': cells,
+            'conflicts': conflict_payload,
+            'unresolved_conflict_count': sum(
+                1 for c in conflicts if c['decision'] is None
+            ),
         })
 
     # 註冊於 /api/schedules/day-overview/（見 urls.py，非 router action）
@@ -683,12 +713,12 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         return Response({'date': date.isoformat(), 'entries': entries})
 
 
-class ScheduleCellAcknowledgmentViewSet(mixins.CreateModelMixin,
-                                        mixins.ListModelMixin,
-                                        viewsets.GenericViewSet):
-    """簽核總表差異認可：管理者按「都保留」後的持久化紀錄。"""
-    queryset = ScheduleCellAcknowledgment.objects.select_related('employee', 'acknowledged_by')
-    serializer_class = ScheduleCellAcknowledgmentSerializer
+class ScheduleOverlapDecisionViewSet(mixins.CreateModelMixin,
+                                     mixins.ListModelMixin,
+                                     viewsets.GenericViewSet):
+    """簽核總表重疊裁決：select（保留不重疊子集）/ coexist（全數並存＋備註）。"""
+    queryset = ScheduleOverlapDecision.objects.select_related('employee', 'decided_by')
+    serializer_class = ScheduleOverlapDecisionSerializer
     permission_classes = [IsSupervisor]
 
     def get_queryset(self):
@@ -711,46 +741,96 @@ class ScheduleCellAcknowledgmentViewSet(mixins.CreateModelMixin,
         return queryset
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        conflict_key = request.data.get('conflict_key') or ''
+        schedule_ids = request.data.get('schedule_ids') or []
+        decision = request.data.get('decision')
+        selected_ids = request.data.get('selected_schedule_ids') or []
+        comment = (request.data.get('comment') or '').strip()
 
-        employee = serializer.validated_data['employee']
-        schedule_date = serializer.validated_data['schedule_date']
-        version_type = serializer.validated_data['version_type']
-        submitted_hash = serializer.validated_data['content_hash']
-
-        org = request.user.organization if not request.user.is_superuser else employee.organization
-        if not org or employee.organization_id != org.pk:
+        if decision not in ('select', 'coexist'):
             return Response(
-                {'error': 'Employee must belong to your organization.'},
+                {'error': 'decision must be "select" or "coexist"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if not conflict_key or not schedule_ids:
+            return Response(
+                {'error': 'conflict_key and schedule_ids are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 重算目前 hash：內容已變（或已無差異）就拒絕，逼前端刷新總表
-        current_hash, involved = summary_module.current_cell_state(
-            org.pk, version_type, employee, schedule_date
-        )
-        if current_hash != submitted_hash:
+        org = request.user.organization
+        if request.user.is_superuser and not org:
+            first = Schedule.objects.filter(pk__in=schedule_ids).select_related(
+                'schedule_version').first()
+            org = first.schedule_version.organization if first else None
+        if not org:
+            return Response({'error': 'organization is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 重算 live 群組：缺少候選、群組已變、key 過期都拒絕
+        version_type = None
+        probe = Schedule.objects.filter(pk__in=schedule_ids).select_related(
+            'schedule_version').first()
+        if probe:
+            version_type = probe.schedule_version.version_type
+        group, current_key = overlaps_module.find_current_group(
+            org.pk, version_type, schedule_ids,
+        ) if version_type else (None, None)
+        if group is None or current_key != conflict_key:
             return Response(
                 {
-                    'code': 'discrepancy_changed',
-                    'error': 'Cell content changed; refresh the summary.',
+                    'code': 'conflict_changed',
+                    'error': 'Conflict group changed; refresh the summary.',
                 },
                 status=status.HTTP_409_CONFLICT
             )
 
-        ack, created = ScheduleCellAcknowledgment.objects.get_or_create(
+        group_ids = {s.pk for s in group}
+        if decision == 'select':
+            selected = set(selected_ids)
+            if not selected or not selected <= group_ids:
+                return Response(
+                    {'error': 'selected_schedule_ids must be a non-empty subset of the group'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            # 被保留的班次彼此不得重疊
+            kept = [s for s in group if s.pk in selected]
+            for i, a in enumerate(kept):
+                for b in kept[i + 1:]:
+                    a_start, a_end = overlaps_module._interval(a)
+                    b_start, b_end = overlaps_module._interval(b)
+                    if a.schedule_version_id != b.schedule_version_id \
+                            and a_start < b_end and b_start < a_end:
+                        return Response(
+                            {'error': 'selected schedules must not overlap each other'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+        else:  # coexist
+            if not comment:
+                return Response(
+                    {'error': 'comment is required for coexist decisions'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            selected = group_ids
+
+        employee = group[0].employee
+        obj, _created = ScheduleOverlapDecision.objects.update_or_create(
             organization=org,
-            employee=employee,
-            schedule_date=schedule_date,
-            version_type=version_type,
-            content_hash=submitted_hash,
-            defaults={'involved': involved, 'acknowledged_by': request.user},
+            conflict_key=conflict_key,
+            defaults={
+                'branch': employee.branch,
+                'version_type': version_type,
+                'employee': employee,
+                'schedule_date': min(s.schedule_date for s in group),
+                'schedule_ids': sorted(group_ids),
+                'decision': decision,
+                'selected_schedule_ids': sorted(selected),
+                'comment': comment,
+                'decided_by': request.user,
+            },
         )
-        response_serializer = self.get_serializer(ack)
         return Response(
-            response_serializer.data,
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            self.get_serializer(obj).data,
+            status=status.HTTP_201_CREATED if _created else status.HTTP_200_OK
         )
 
 
