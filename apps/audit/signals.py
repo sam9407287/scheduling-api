@@ -46,7 +46,7 @@ def _should_skip_audit(sender):
         return True
 
     # Skip audit's own models and Django internal models
-    skip_labels = {'audit', 'sessions', 'contenttypes', 'admin', 'auth', 'migrations'}
+    skip_labels = {'audit', 'sessions', 'contenttypes', 'admin', 'auth', 'migrations', 'authtoken'}
     if sender._meta.app_label in skip_labels:
         return True
 
