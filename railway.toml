@@ -3,6 +3,9 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile.production"
 
 [deploy]
-startCommand = "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 2 --timeout 120"
+# No startCommand here on purpose: Railway's startCommand parser does NOT do
+# shell parameter expansion (${PORT:-8000} stays literal), which breaks the
+# gunicorn bind address. The Dockerfile's shell-form CMD runs via /bin/sh -c
+# with full expansion, so the boot sequence lives there.
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

@@ -49,15 +49,17 @@ class FirebaseAuthentication(authentication.BaseAuthentication):
     
     def authenticate(self, request):
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-        
+
         if not auth_header:
             return None
-        
-        try:
-            # Extract token from "Bearer <token>"
-            token = auth_header.split(' ')[1]
-        except IndexError:
-            raise exceptions.AuthenticationFailed('Invalid token format. Use "Bearer <token>"')
+
+        # Only handle the Bearer scheme. Other schemes (e.g. "Token <key>")
+        # belong to other authentication classes — returning None lets DRF
+        # fall through to them instead of failing the whole request here.
+        parts = auth_header.split(' ')
+        if len(parts) != 2 or parts[0].lower() != 'bearer':
+            return None
+        token = parts[1]
         
         try:
             # Verify Firebase token
