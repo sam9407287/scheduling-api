@@ -1,6 +1,6 @@
 # 雲端後端串接指南（給前端工程師）
 
-> 更新日期：2026-08-15
+> 更新日期：2026-08-24
 > 後端已部署至 Railway，本文說明前端如何連線、認證與注意事項。
 > API 端點細節請看 [FRONTEND_API.md](./FRONTEND_API.md)（扁平 API 參考，含請求/回應格式）。
 
@@ -33,6 +33,29 @@ VITE_BYPASS_AUTH=false
 **兩種模式可以並存**：`.env.local` 連本地、`.env.production` 連雲端，
 `npm run build` 會吃 production 檔。
 
+## 2.1 正式部署（Firebase Hosting）設定 ⚠️
+
+前端已部署在 Firebase Hosting（`intelligent-scheduling-system.web.app`）。
+**部署版的 `.env.production` 必須用以下值重新 build 再 deploy**，
+不能留範本裡的 `localhost`：
+
+```bash
+VITE_API_BASE_URL=https://web-production-8eb28.up.railway.app/api
+VITE_AUTH_MODE=token
+VITE_BYPASS_AUTH=false   # 正式環境務必關閉，範本裡的 true 只是前端驗收用
+```
+
+改完執行 `npm run build && firebase deploy --only hosting`。
+
+後端 CORS 已允許以下來源（2026-08-24 起生效）：
+- `https://intelligent-scheduling-system.web.app`
+- `https://intelligent-scheduling-system.firebaseapp.com`
+- `http://localhost:3000`（本地開發）
+
+若看到「無法連線後端」toast：先開 DevTools Network 看實際打的網址——
+打到 `localhost:8000` 就是 build 時 env 沒帶到；打到 Railway 網址但被擋
+就是 CORS（把你的 Origin 告訴 Sam）。
+
 ## 3. 認證
 
 - 生產環境登入沿用同一支端點：`POST /api/auth/login/`，body `{"username", "password"}`，回傳 `{token, user}`。
@@ -42,7 +65,7 @@ VITE_BYPASS_AUTH=false
 
 ## 4. CORS 與網域
 
-- 目前後端允許的跨域來源：`http://localhost:3000`（你本地 dev server 直連雲端 API 用）。
+- 目前後端允許的跨域來源：`localhost:3000`、`intelligent-scheduling-system.web.app`、`intelligent-scheduling-system.firebaseapp.com`（見 §2.1）。
 - **前端要部署上線時，把你的正式網域告訴 Sam**，後端加進 `CORS_ALLOWED_ORIGINS` 即可（Railway 環境變數，改完自動重啟）。
 - 若前端也部署在 Railway 同專案內，走公網網域即可，不需特別處理。
 
