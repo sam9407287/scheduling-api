@@ -28,4 +28,5 @@ urlpatterns = [
     path('api/compliance/', include('apps.compliance.urls')),
     path('api/ai/', include('apps.ai_engine.urls')),
     path('api/billing/', include('apps.billing.urls')),
+    path('api/leaves/', include('apps.leaves.urls')),
 ]

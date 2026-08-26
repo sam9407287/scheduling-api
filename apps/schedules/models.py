@@ -93,6 +93,7 @@ class Schedule(models.Model):
         ('confirmed', '已確認'),
         ('completed', '已完成'),
         ('cancelled', '已取消'),
+        ('leave', '請假'),
     ]
 
     schedule_version = models.ForeignKey(

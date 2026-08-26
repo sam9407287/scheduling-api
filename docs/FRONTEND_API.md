@@ -552,6 +552,60 @@ field list).
 
 ---
 
+## 8.1 Leaves  (`authenticated`; approval needs `supervisor`)
+
+Full-day leave with single-layer approval. Employees see and submit only
+their own; supervisor+ sees the whole org and may submit ON BEHALF of an
+employee — on-behalf requests are auto-approved (phone-in leave).
+
+```
+GET/POST  /api/leaves/requests/?status=&employee=&date_from=&date_to=
+GET       /api/leaves/requests/{id}/
+POST      /api/leaves/requests/{id}/approve/    // supervisor+, body {"note"?}
+POST      /api/leaves/requests/{id}/reject/     // supervisor+, body {"note"} REQUIRED
+POST      /api/leaves/requests/{id}/cancel/     // own pending, or supervisor+ on approved
+GET       /api/leaves/requests/impact/?employee=&start_date=&end_date=
+GET       /api/leaves/requests/balance/[?employee=]
+```
+
+Create body:
+```jsonc
+{ "employee": 12, "leave_type": "annual",   // annual特休 sick病假 personal事假
+                                            // menstrual生理假 marriage婚假 bereavement喪假
+                                            // maternity產假 paternity陪產假 official公假 other
+  "start_date": "2026-09-10", "end_date": "2026-09-11", "reason": "..." }
+// response adds: status(+_display), total_days, employee_code/name,
+//                created_by/reviewed_by(+_name), review_note, affected_schedule_ids
+```
+
+Behaviour on approve (single source of truth for the roster):
+- the employee's Schedule rows in range (non-archived versions) flip to
+  `status: "leave"` — kept, never deleted; the roster shows the vacancy.
+- `affected_schedule_ids` stores `[{id, prev_status}]`; cancelling an
+  approved leave restores exactly those rows (cells hand-edited afterwards
+  are left alone).
+- approved leave days are HARD unavailable dates for AI generate and
+  derive-legal. Manual scheduling on a leave day is still allowed —
+  warn, don't block (same philosophy as cross-version overlaps).
+- 409 codes: `leave_not_pending` (approve/reject a non-pending request),
+  `leave_not_cancellable`.
+
+Impact preview (`impact/`) returns the schedules that would be affected —
+call it right after the user picks dates so they see "這幾天你有 N 個班"
+before submitting, and again on the review screen.
+
+Balance (`balance/`) tracks annual-leave (特休) quota per Labor Standards
+Act §38 (6mo→3d, 1y→7, 2y→10, 3y→14, 5y→15, 10y+→+1/yr cap 30),
+anniversary-year accounting; only APPROVED `annual` requests deduct:
+```jsonc
+{ "employee": 12, "hire_date": "2024-01-01", "as_of": "2026-08-26",
+  "entitlement_year_start": "2026-01-01", "entitlement_year_end": "2026-12-31",
+  "entitled_days": 10, "used_days": 3, "remaining_days": 7 }
+```
+
+Schedule rows gained a `"leave"` status choice — render those cells with a
+distinct 請假 style in the roster grid.
+
 ## 9. Typical call sequence
 
 ```

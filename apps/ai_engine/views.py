@@ -196,6 +196,13 @@ class AIEngineViewSet(viewsets.ViewSet):
         for s in confirmed_schedules:
             unavailability_map[s['employee_id']].append(s['schedule_date'].isoformat())
 
+        # 已核准請假日＝solver 硬性不可排班（手動排班仍僅警告不阻擋）
+        from apps.leaves.solver_dates import approved_leave_dates
+        for eid, dates in approved_leave_dates(
+            employee_id_list, period_start, period_end
+        ).items():
+            unavailability_map[eid].extend(dates)
+
         # 合併呼叫方手動傳入的不可用日期
         manual_unavailability: dict = data.get('constraints', {}).get('employee_unavailability', {})
 

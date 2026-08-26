@@ -167,6 +167,11 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             .prefetch_related('certifications')
         )
 
+        from apps.leaves.solver_dates import approved_leave_dates
+        leave_dates = approved_leave_dates(
+            candidates_qs.values_list('id', flat=True),
+            b_version.period_start, b_version.period_end,
+        )
         employees = [
             {
                 'id': emp.id,
@@ -175,7 +180,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 'certifications': list(
                     emp.certifications.values_list('id', flat=True)
                 ),
-                'unavailable_dates': [],
+                'unavailable_dates': leave_dates.get(emp.id, []),
                 'availability': {},
             }
             for emp in candidates_qs
