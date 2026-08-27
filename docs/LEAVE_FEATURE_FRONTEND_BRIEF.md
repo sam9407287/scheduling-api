@@ -1,38 +1,58 @@
-# 請假功能前端開發簡報
+# 請假功能前端開發需求（交給前端工程師）
 
-> 2026-08-26。後端已上線（本地＋Railway 生產都已部署）。
-> API 詳細契約見 FRONTEND_API.md §8.1；本文講 UX 流程與畫面建議。
+> 2026-08-27。後端 API 已上線（本地＋Railway 生產皆可打）。
+> API 完整契約見 FRONTEND_API.md §8.1；本文定義「必須做到的行為」。
+> **畫面長相、版面配置、元件選擇由你設計**——你最了解現有 UI 的語彙，
+> 請延續你做排班管理、簽核總表時的風格與互動慣例即可。
 
-## 產品決策（已與 Sam 確認）
+## 一、產品決策（已定案，行為請照做）
 
-1. 全日假、單層審核：員工送出 → supervisor 以上核准/駁回（駁回必填理由）。
-2. **主管代登記直接視同已核准**（電話請假情境，POST 同一支端點即可）。
-3. 核准後班次**標記為 `leave` 狀態保留紀錄**，不刪除；取消核准自動還原。
-4. 特休額度依勞基法年資級距自動計算，只有「已核准的特休」扣額度。
-5. 請假日 = AI 排班硬約束；**手動排班在請假日只警告不阻擋**（與跨版本重疊同哲學）。
+1. 全日假（不做半天/小時），單層審核：員工送出 → supervisor 以上核准或駁回，**駁回必填理由**。
+2. **主管代員工登記 = 送出即自動核准**（電話請假情境）。用同一支 `POST /api/leaves/requests/`，後端依身份自動判斷。
+3. 核准後，該員工範圍內的班次會被後端標成 `status: "leave"`（保留紀錄不刪除）；取消核准會自動還原。前端不用自己動班次。
+4. 特休（annual）額度後端依勞基法年資自動計算；**超額申請不擋件**，餘額只是給申請人與審核者的參考資訊。
+5. 請假日的手動排班**警告但不阻擋**（與跨版本重疊同一哲學）；AI 排班後端已自動避開請假日，前端零成本。
 
-## 畫面建議
+## 二、必要的使用者能力（驗收標準）
 
-### 員工端「我的請假」
-- 申請表單：假別下拉（10 種，用 `leave_type_display`）＋日期範圍＋事由
-- **選完日期立即呼叫 `GET /requests/impact/`**，顯示「這幾天你有 N 個已排班次」
-- 特休選項旁顯示 `GET /requests/balance/` 的「剩餘 X 天」；超額仍可送出（後端不擋，主管審核時自行判斷）
-- 列表：pending/approved/rejected/cancelled 狀態徽章；rejected 顯示 review_note
-- pending 可自行取消（`POST {id}/cancel/`）
+**員工**：
+- 能申請請假（假別 × 日期範圍 × 事由）並看到自己歷次申請與狀態
+- 送出前能看到「這段期間我已有 N 個班次」（`GET /requests/impact/`）
+- 選特休時能看到剩餘天數（`GET /requests/balance/`）
+- 能取消自己 pending 的申請；被駁回能看到理由
 
-### 管理端「請假管理」
-- 側邊欄 badge：`GET /requests/?status=pending` 的 count
-- 審核卡片同畫面顯示 impact（受影響班次清單）＋該員工特休餘額
-- 核准/駁回按鈕；駁回強制填 note
-- 「代員工登記」按鈕 → 同一個表單但可選員工，送出即已核准
-- 已核准的請假可取消（還原班次），需 supervisor 以上
+**主管**：
+- 能看到待審申請（含數量提示）並核准/駁回
+- 審核時能在同一個視野看到影響（受影響班次）與該員工特休餘額——不用跳頁查
+- 能代任何員工登記請假（即刻生效）
+- 能取消已核准的請假（後端會還原班次）
 
-### 班表整合
-- Schedule 新增 `status: "leave"`：格子用明顯請假樣式（灰底＋「假」字之類）
-- 手動排班/拖曳到該員工的已核准請假日：跳警告 toast 但允許（可用
-  `GET /requests/?employee=&status=approved&date_from=&date_to=` 查是否請假日）
-- AI 排班會自動避開請假日，前端不用做事
+**班表**：
+- `status: "leave"` 的格子在週班表/月班表/Excel 上有可辨識的呈現方式（樣式你決定）
+- 把班排到某人的已核准請假日時給予警告（不阻擋）
 
-## 409 錯誤碼
-- `leave_not_pending`：核准/駁回時申請已不是 pending → 重新整理列表
-- `leave_not_cancellable`：已 rejected/cancelled 的不能再取消
+## 三、API 速查
+
+```
+GET/POST  /api/leaves/requests/?status=&employee=&date_from=&date_to=
+POST      /api/leaves/requests/{id}/approve/    (supervisor+, body {"note"?})
+POST      /api/leaves/requests/{id}/reject/     (supervisor+, body {"note"} 必填)
+POST      /api/leaves/requests/{id}/cancel/     (自己的 pending；approved 需 supervisor+)
+GET       /api/leaves/requests/impact/?employee=&start_date=&end_date=
+GET       /api/leaves/requests/balance/[?employee=]
+```
+
+- 假別 10 種，直接用回傳的 `leave_type_display` 顯示，不要前端寫死中文。
+- 員工帳號只看得到自己的申請（後端已過濾）；主管看全機構。
+- 409 錯誤碼：`leave_not_pending`（申請已被處理，重新整理列表）、`leave_not_cancellable`。
+- Schedule 物件的 `status` 多了 `"leave"` 選項，留意既有的狀態 switch/badge 有沒有 default 分支。
+
+## 四、留給你設計判斷的部分（刻意不規定）
+
+- 請假入口放哪（獨立頁？排班頁側欄？員工個人頁？）
+- 審核介面的形式（列表展開？卡片？Dialog？）
+- 請假格子的視覺（底色/圖示/文字，只要跟現有班別色不打架）
+- 月班表與 Excel 匯出裡請假日要不要特別標（建議要，形式你定）
+- 餘額、影響預覽的呈現時機與位置
+
+有 API 行為問題直接找 Sam；契約如需調整，後端可以配合改，先講再動。

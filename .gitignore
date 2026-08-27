@@ -63,3 +63,6 @@ celerybeat.pid
 docs/_build/
 dev_db.sqlite3
 dev_local.sqlite3
+
+# Generated PDF deliverables (rebuild via scripts/md_to_pdf.py)
+/*.pdf
