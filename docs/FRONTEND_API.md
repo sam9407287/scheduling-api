@@ -33,6 +33,19 @@ Authorization: Token <drf-token>               # dev/test (from /auth/login/)
 // 401 → { "error": "帳號或密碼錯誤" }
 ```
 
+### `GET /api/auth/users/me/`
+
+```jsonc
+// 200 — the ONLY trusted mapping from login identity to Employee
+{ "id": 5, "username": "alice", "role_name": "employee",
+  "organization": 1, "organization_name": "Demo Care Center",
+  "branch": 3, "branch_name": "Taipei",
+  "employee_pk": 98, "employee_code": "E0001",   // null when the user has
+                                                  // no Employee profile —
+                                                  // never guess from lists
+  "email": "…", "first_name": "…", "last_name": "…", "phone": "", "is_active": true }
+```
+
 ---
 
 ## Shared conventions
@@ -558,6 +571,13 @@ Full-day leave with single-layer approval. Employees see and submit only
 their own; supervisor+ sees the whole org and may submit ON BEHALF of an
 employee — on-behalf requests are auto-approved (phone-in leave).
 
+**Submission source** (backend-owned, read-only `submission_source`):
+- `self` — the target employee IS the requester (including a supervisor
+  filing their own leave) → created as `pending`, goes through review.
+- `manager_proxy` — supervisor+ filing for someone else → auto-approved.
+No one can approve/reject their OWN request (403
+`self_approval_forbidden`) — withdrawing your own request is `cancel/`.
+
 ```
 GET/POST  /api/leaves/requests/?status=&employee=&date_from=&date_to=
 GET       /api/leaves/requests/{id}/
@@ -588,7 +608,7 @@ Behaviour on approve (single source of truth for the roster):
   derive-legal. Manual scheduling on a leave day is still allowed —
   warn, don't block (same philosophy as cross-version overlaps).
 - 409 codes: `leave_not_pending` (approve/reject a non-pending request),
-  `leave_not_cancellable`.
+  `leave_not_cancellable`. 403 code: `self_approval_forbidden`.
 
 Impact preview (`impact/`) returns the schedules that would be affected —
 call it right after the user picks dates so they see "這幾天你有 N 個班"
