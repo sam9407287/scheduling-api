@@ -299,3 +299,72 @@ class TestSolverIntegration:
             if a['employee_id'] == employee.pk and a['date'] == '2026-09-02'
         ]
         assert leave_day_assignments == []
+
+
+class TestLeaveV2P0:
+    """LEAVE_V2 P0：身分對應、本人 vs 代登記、禁止自我核准。"""
+
+    def test_me_returns_employee_pk(self, employee_api_client, employee):
+        response = employee_api_client.get('/api/auth/users/me/')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['employee_pk'] == employee.pk
+        assert response.data['employee_code'] == employee.employee_id
+        assert response.data['organization'] == employee.organization_id
+
+    def test_me_without_profile_returns_null(self, admin_api_client):
+        response = admin_api_client.get('/api/auth/users/me/')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['employee_pk'] is None
+        assert response.data['employee_code'] is None
+
+    def test_supervisor_self_submission_stays_pending(self, supervisor_api_client,
+                                                      supervisor_user, organization, branch):
+        sup_emp = Employee.objects.create(
+            user=supervisor_user, employee_id='SUP1', organization=organization,
+            branch=branch, position='supervisor', hire_date=date(2024, 1, 1),
+        )
+        response = supervisor_api_client.post(LEAVES_URL, {
+            'employee': sup_emp.pk, 'leave_type': 'personal',
+            'start_date': '2026-09-10', 'end_date': '2026-09-10',
+        }, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['status'] == 'pending'
+        assert response.data['submission_source'] == 'self'
+
+    def test_on_behalf_records_manager_proxy(self, supervisor_api_client, employee):
+        response = supervisor_api_client.post(LEAVES_URL, {
+            'employee': employee.pk, 'leave_type': 'sick',
+            'start_date': '2026-09-10', 'end_date': '2026-09-10',
+        }, format='json')
+        assert response.data['status'] == 'approved'
+        assert response.data['submission_source'] == 'manager_proxy'
+
+    def test_cannot_approve_own_request(self, supervisor_api_client, admin_api_client,
+                                        supervisor_user, organization, branch):
+        sup_emp = Employee.objects.create(
+            user=supervisor_user, employee_id='SUP1', organization=organization,
+            branch=branch, position='supervisor', hire_date=date(2024, 1, 1),
+        )
+        leave_id = supervisor_api_client.post(LEAVES_URL, {
+            'employee': sup_emp.pk, 'leave_type': 'personal',
+            'start_date': '2026-09-10', 'end_date': '2026-09-10',
+        }, format='json').data['id']
+
+        own_approve = supervisor_api_client.post(f'{LEAVES_URL}{leave_id}/approve/', {}, format='json')
+        assert own_approve.status_code == status.HTTP_403_FORBIDDEN
+        assert own_approve.data['code'] == 'self_approval_forbidden'
+        own_reject = supervisor_api_client.post(f'{LEAVES_URL}{leave_id}/reject/', {'note': 'x'}, format='json')
+        assert own_reject.status_code == status.HTTP_403_FORBIDDEN
+
+        # 其他主管（admin）可以正常核准
+        other = admin_api_client.post(f'{LEAVES_URL}{leave_id}/approve/', {}, format='json')
+        assert other.status_code == status.HTTP_200_OK
+
+    def test_submission_source_not_client_writable(self, employee_api_client, employee):
+        response = employee_api_client.post(LEAVES_URL, {
+            'employee': employee.pk, 'leave_type': 'personal',
+            'start_date': '2026-09-10', 'end_date': '2026-09-10',
+            'submission_source': 'manager_proxy',  # 應被忽略
+        }, format='json')
+        assert response.data['submission_source'] == 'self'
+        assert response.data['status'] == 'pending'

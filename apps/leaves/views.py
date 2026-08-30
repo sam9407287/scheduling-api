@@ -97,10 +97,16 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        leave = serializer.save(organization=employee.organization, created_by=user)
+        # 本人申請（含主管幫自己請假）一律 pending 送審；
+        # 只有「主管替其他員工」代登記才自動核准（LEAVE_V2 P0）。
+        source = 'manager_proxy' if on_behalf else 'self'
+        leave = serializer.save(
+            organization=employee.organization,
+            created_by=user,
+            submission_source=source,
+        )
 
-        # 主管代登記（含幫自己登記的主管）直接視同已核准
-        if _is_supervisor(user):
+        if on_behalf:
             self._apply_approval(leave, user, note='主管代登記，自動核准')
             leave.refresh_from_db()
 
@@ -124,9 +130,19 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         LeaveRequest.objects.filter(pk=leave.pk).update(affected_schedule_ids=snapshot)
         return True
 
+    @staticmethod
+    def _is_own_request(leave, user):
+        return leave.employee.user_id == user.pk
+
     @action(detail=True, methods=['post'], permission_classes=[IsSupervisor])
     def approve(self, request, pk=None):
         leave = self.get_object()
+        if self._is_own_request(leave, request.user):
+            return Response(
+                {'code': 'self_approval_forbidden',
+                 'error': 'You cannot approve your own leave request.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         if not self._apply_approval(leave, request.user,
                                     note=(request.data.get('note') or '').strip()):
             return Response(
@@ -139,6 +155,12 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsSupervisor])
     def reject(self, request, pk=None):
         leave = self.get_object()
+        if self._is_own_request(leave, request.user):
+            return Response(
+                {'code': 'self_approval_forbidden',
+                 'error': 'You cannot review your own leave request; cancel it instead.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         note = (request.data.get('note') or '').strip()
         if not note:
             return Response({'error': 'note is required when rejecting'},

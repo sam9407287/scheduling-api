@@ -32,6 +32,12 @@ class LeaveRequest(models.Model):
         ('cancelled', '已取消'),
     ]
 
+    SUBMISSION_SOURCE_CHOICES = [
+        ('self', '本人申請'),
+        ('manager_proxy', '主管代登記'),
+        ('system', '系統'),
+    ]
+
     organization = models.ForeignKey(
         'organizations.Organization',
         on_delete=models.CASCADE,
@@ -58,7 +64,14 @@ class LeaveRequest(models.Model):
         default='pending',
         verbose_name='狀態'
     )
-    # 主管代員工登記時 created_by != employee.user；代登記直接視同已核准
+    # 送件來源由後端保存為唯一可信值（LEAVE_V2 P0）：
+    # self=本人（含主管幫自己請假，走 pending）；manager_proxy=主管代登記（自動核准）
+    submission_source = models.CharField(
+        max_length=20,
+        choices=SUBMISSION_SOURCE_CHOICES,
+        default='self',
+        verbose_name='送件來源'
+    )
     created_by = models.ForeignKey(
         'accounts.User',
         on_delete=models.SET_NULL,
