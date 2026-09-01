@@ -353,11 +353,10 @@ POST /api/schedules/versions/{B_id}/derive-legal/
 
 ```jsonc
 POST /api/schedules/versions/{id}/unapprove/
-{ "reason": "排班內容有誤" }        // required, non-blank
+{ "reason": "排班內容有誤" }        // OPTIONAL — one-click cancel works with {}
 
 // 200 → full ScheduleVersion body (status back to "draft",
 //        approved_by / approved_at cleared)
-// 400 { "error": "reason is required" }
 // 409 { "code": "unapprove_conflict", "error": "Only approved versions can be unapproved." }
 ```
 
@@ -613,6 +612,45 @@ Behaviour on approve (single source of truth for the roster):
 Impact preview (`impact/`) returns the schedules that would be affected —
 call it right after the user picks dates so they see "這幾天你有 N 個班"
 before submitting, and again on the review screen.
+
+**Time-range leave** (hourly, simplified v1): set `request_unit:
+"time_range"` with `start_time`/`end_time` — single day only
+(`start_date == end_date`), same-day `start < end`, no cross-midnight.
+Approval of a time-range leave does NOT touch schedule rows
+(`affected_schedule_ids` stays `[]`) — overlay it in the roster from
+`GET /requests/?status=approved`. The AI solver blocks only shifts whose
+times overlap the interval; the rest of the day stays schedulable.
+
+```
+GET /api/leaves/balances/[?employee=]     // multi-type balance panel
+GET/PUT /api/leaves/settings/             // org day_minutes + per-type quotas (supervisor+)
+```
+
+`balances/` returns every leave type in MINUTES (day = org `day_minutes`,
+default 480, configurable 60–1440 via `settings/`):
+```jsonc
+{ "employee": 98, "as_of": "2026-09-01", "day_minutes": 480,
+  "entitlement_year_start": "2026-01-01", "entitlement_year_end": "2026-12-31",
+  "balances": [
+    { "leave_type": "sick", "leave_type_display": "病假",
+      "entitled_minutes": 14400,      // null = unlimited (event-based types)
+      "used_minutes": 240, "pending_minutes": 0,
+      "remaining_minutes": 14160 }    // can go NEGATIVE — overdraft warns, never blocks
+  ] }
+```
+Quota defaults follow 勞工請假規則 (sick 30d / personal 14d / menstrual
+12d; marriage/bereavement/maternity/… unlimited); orgs override via
+`PUT settings/ { "day_minutes": 420, "quotas": [{ "leave_type": "sick",
+"annual_quota_minutes": 10000 }] }`. Annual (特休) is always statutory —
+not configurable. Balances are computed live, so changing `day_minutes`
+rescales history. `impact/` accepts optional `&start_time=&end_time=` and
+then returns `overlap_minutes` + `daily_breakdown` per date.
+
+Rows with status `"leave"`/`"cancelled"` are excluded from labour-law
+compliance checks and from derive-legal seeding — they are not worked time.
+
+Legacy `balance/` (annual-only, day-based) still works but is deprecated
+in favour of `balances/`.
 
 Balance (`balance/`) tracks annual-leave (特休) quota per Labor Standards
 Act §38 (6mo→3d, 1y→7, 2y→10, 3y→14, 5y→15, 10y+→+1/yr cap 30),

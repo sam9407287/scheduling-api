@@ -162,6 +162,8 @@ def check_schedule_violations(
     schedules = list(
         Schedule.objects
         .filter(schedule_version=schedule_version)
+        # 請假/取消的格子不是實際工時，不參與勞基法檢查
+        .exclude(status__in=('cancelled', 'leave'))
         .select_related('employee', 'employee__user', 'shift_template')
     )
 

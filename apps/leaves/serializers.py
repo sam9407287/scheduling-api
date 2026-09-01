@@ -19,6 +19,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'organization', 'employee', 'employee_code', 'employee_name',
             'leave_type', 'leave_type_display', 'start_date', 'end_date',
+            'request_unit', 'start_time', 'end_time',
             'total_days', 'reason', 'status', 'status_display',
             'submission_source',
             'created_by', 'created_by_name', 'reviewed_by', 'reviewed_by_name',
@@ -40,4 +41,18 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         end = attrs.get('end_date')
         if start and end and end < start:
             raise serializers.ValidationError({'end_date': 'end_date must not be before start_date'})
+
+        # 小時制簡化版限制：單日、同日 start<end（不跨午夜）
+        if attrs.get('request_unit') == 'time_range':
+            start_time = attrs.get('start_time')
+            end_time = attrs.get('end_time')
+            if not start_time or not end_time:
+                raise serializers.ValidationError(
+                    {'start_time': 'start_time and end_time are required for time_range'})
+            if start != end:
+                raise serializers.ValidationError(
+                    {'end_date': 'time_range leave must be a single day (start_date == end_date)'})
+            if end_time <= start_time:
+                raise serializers.ValidationError(
+                    {'end_time': 'end_time must be after start_time (cross-midnight not supported)'})
         return attrs

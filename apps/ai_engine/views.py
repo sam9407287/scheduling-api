@@ -197,11 +197,14 @@ class AIEngineViewSet(viewsets.ViewSet):
             unavailability_map[s['employee_id']].append(s['schedule_date'].isoformat())
 
         # 已核准請假日＝solver 硬性不可排班（手動排班仍僅警告不阻擋）
-        from apps.leaves.solver_dates import approved_leave_dates
+        from apps.leaves.solver_dates import approved_leave_dates, approved_leave_intervals
         for eid, dates in approved_leave_dates(
             employee_id_list, period_start, period_end
         ).items():
             unavailability_map[eid].extend(dates)
+        # 時段假：只擋重疊班別
+        leave_intervals = approved_leave_intervals(
+            employee_id_list, period_start, period_end)
 
         # 合併呼叫方手動傳入的不可用日期
         manual_unavailability: dict = data.get('constraints', {}).get('employee_unavailability', {})
@@ -247,6 +250,7 @@ class AIEngineViewSet(viewsets.ViewSet):
                     unavailability_map.get(emp.id, [])
                     + manual_unavailability.get(str(emp.id), [])
                 )),
+                'unavailable_intervals': leave_intervals.get(emp.id, {}),
                 'availability': avail_data,
                 # Attributes consumed by the team-constraint compiler.
                 # Sensitive fields here are auto-null-gated by EmployeeDataConsent.

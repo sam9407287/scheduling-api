@@ -38,6 +38,11 @@ class LeaveRequest(models.Model):
         ('system', '系統'),
     ]
 
+    REQUEST_UNIT_CHOICES = [
+        ('full_day', '全日'),
+        ('time_range', '時段'),
+    ]
+
     organization = models.ForeignKey(
         'organizations.Organization',
         on_delete=models.CASCADE,
@@ -57,6 +62,15 @@ class LeaveRequest(models.Model):
     )
     start_date = models.DateField(verbose_name='開始日期')
     end_date = models.DateField(verbose_name='結束日期')
+    # 小時制（簡化版）：time_range 限單日、同日 start<end、不跨午夜
+    request_unit = models.CharField(
+        max_length=10,
+        choices=REQUEST_UNIT_CHOICES,
+        default='full_day',
+        verbose_name='請假單位'
+    )
+    start_time = models.TimeField(null=True, blank=True, verbose_name='開始時間')
+    end_time = models.TimeField(null=True, blank=True, verbose_name='結束時間')
     reason = models.TextField(blank=True, verbose_name='事由')
     status = models.CharField(
         max_length=10,
@@ -108,5 +122,72 @@ class LeaveRequest(models.Model):
         """全日假：起訖含頭尾的日曆天數。"""
         return (self.end_date - self.start_date).days + 1
 
+    def duration_minutes(self, day_minutes: int) -> int:
+        """扣額度用的分鐘數（動態計算不落庫）。
+
+        time_range＝時段長；full_day＝天數 × 機構的 day_minutes。
+        """
+        if self.request_unit == 'time_range' and self.start_time and self.end_time:
+            return (
+                (self.end_time.hour * 60 + self.end_time.minute)
+                - (self.start_time.hour * 60 + self.start_time.minute)
+            )
+        return self.total_days * day_minutes
+
     def __str__(self):
         return f"{self.employee.employee_id} {self.get_leave_type_display()} {self.start_date}~{self.end_date} ({self.get_status_display()})"
+
+
+class OrgLeaveSettings(models.Model):
+    """機構層級請假設定。
+
+    day_minutes：小時制請假換算「一天」的分鐘數（預設 8h=480，機構可調）。
+    改動會即時重算歷史用量（餘額為動態計算不落庫）。
+    """
+    organization = models.OneToOneField(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='leave_settings',
+        verbose_name='所屬機構'
+    )
+    day_minutes = models.PositiveIntegerField(default=480, verbose_name='一天等於幾分鐘')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '請假設定'
+        verbose_name_plural = '請假設定'
+
+    def __str__(self):
+        return f"{self.organization_id}: 1 day = {self.day_minutes} min"
+
+
+class LeaveTypeQuota(models.Model):
+    """機構可設定的假別年度額度（分鐘）。
+
+    annual_quota_minutes=null 代表不限。特休（annual）不吃這張表——
+    永遠依勞基法年資級距（annual.py）。超額一律警告不擋。
+    """
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='leave_type_quotas',
+        verbose_name='所屬機構'
+    )
+    leave_type = models.CharField(
+        max_length=20,
+        choices=LeaveRequest.LEAVE_TYPE_CHOICES,
+        verbose_name='假別'
+    )
+    annual_quota_minutes = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name='年度額度（分鐘，null=不限）'
+    )
+    is_active = models.BooleanField(default=True, verbose_name='啟用')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '假別額度'
+        verbose_name_plural = '假別額度'
+        unique_together = [['organization', 'leave_type']]
+
+    def __str__(self):
+        return f"{self.organization_id} {self.leave_type}: {self.annual_quota_minutes or '∞'}"

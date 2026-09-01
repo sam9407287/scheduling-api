@@ -129,6 +129,8 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         b_schedules = list(
             Schedule.objects
             .filter(schedule_version=b_version)
+            # 請假/取消的格子不進 seed——請假者的班本來就該被移轉
+            .exclude(status__in=('cancelled', 'leave'))
             .select_related('shift_template', 'employee')
         )
         if not b_schedules:
@@ -167,10 +169,13 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             .prefetch_related('certifications')
         )
 
-        from apps.leaves.solver_dates import approved_leave_dates
+        from apps.leaves.solver_dates import approved_leave_dates, approved_leave_intervals
+        candidate_ids = list(candidates_qs.values_list('id', flat=True))
         leave_dates = approved_leave_dates(
-            candidates_qs.values_list('id', flat=True),
-            b_version.period_start, b_version.period_end,
+            candidate_ids, b_version.period_start, b_version.period_end,
+        )
+        leave_intervals = approved_leave_intervals(
+            candidate_ids, b_version.period_start, b_version.period_end,
         )
         employees = [
             {
@@ -181,6 +186,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                     emp.certifications.values_list('id', flat=True)
                 ),
                 'unavailable_dates': leave_dates.get(emp.id, []),
+                'unavailable_intervals': leave_intervals.get(emp.id, {}),
                 'availability': {},
             }
             for emp in candidates_qs
@@ -450,12 +456,8 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
 
         version = self.get_object()
 
+        # reason 選填（2026-09-01 起一鍵取消）：有填記入稽核，沒填記空字串
         reason = (request.data.get('reason') or '').strip()
-        if not reason:
-            return Response(
-                {'error': 'reason is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
         old_approved_by_id = version.approved_by_id
         old_approved_at = version.approved_at

@@ -74,13 +74,14 @@ class TestUnapprove:
         assert response.data['approved_by'] is None
         assert response.data['approved_at'] is None
 
-    def test_unapprove_requires_reason(self, admin_api_client, organization, admin_user):
+    def test_unapprove_without_reason_succeeds(self, admin_api_client, organization, admin_user):
+        """一鍵取消：reason 選填（2026-09-01 前端要求）。"""
         version = _version(organization, admin_user, status_value='approved')
-        for body in ({}, {'reason': '   '}):
-            response = admin_api_client.post(
-                f'/api/schedules/versions/{version.pk}/unapprove/', body, format='json',
-            )
-            assert response.status_code == status.HTTP_400_BAD_REQUEST
+        response = admin_api_client.post(
+            f'/api/schedules/versions/{version.pk}/unapprove/', {}, format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['status'] == 'draft'
 
     def test_unapprove_non_approved_returns_409(self, admin_api_client, organization, admin_user):
         version = _version(organization, admin_user)  # draft

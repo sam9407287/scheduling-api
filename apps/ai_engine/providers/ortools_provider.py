@@ -539,6 +539,18 @@ class ORToolsProvider(BaseScheduleProvider):
                     )
 
         # 3. 員工可用性（不可用日期禁止排班）
+        # 3b. 時段假：只封鎖與請假時段重疊的班別，同日其他班照排
+        for emp in employees:
+            emp_id = emp['id']
+            intervals_by_date = emp.get('unavailable_intervals') or {}
+            for day_idx, day in enumerate(days):
+                for interval_start, interval_end in intervals_by_date.get(day.isoformat(), []):
+                    for shift in shifts:
+                        if self._times_overlap(
+                            shift.get('start_time', '00:00'), shift.get('end_time', '00:00'),
+                            interval_start, interval_end,
+                        ):
+                            model.Add(assignments[emp_id][day_idx][shift['id']] == 0)
         for emp in employees:
             emp_id = emp['id']
             unavailable_dates = set(emp.get('unavailable_dates', []))
