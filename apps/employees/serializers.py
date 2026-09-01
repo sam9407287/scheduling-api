@@ -134,6 +134,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user_data = validated_data.pop('user', None)
         user_id = validated_data.pop('user_id', None)
+        # M2M 不能進 objects.create()/setattr，取出後用 .set()
+        certifications = validated_data.pop('certifications', None)
 
         with transaction.atomic():
             if user_id:
@@ -155,12 +157,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 user.save()
 
             employee = Employee.objects.create(user=user, **validated_data)
+            if certifications is not None:
+                employee.certifications.set(certifications)
 
         return employee
 
     def update(self, instance, validated_data):
         user_data = validated_data.pop('user', None)
         validated_data.pop('user_id', None)
+        certifications = validated_data.pop('certifications', None)
 
         with transaction.atomic():
             if user_data:
@@ -176,6 +181,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     instance.user.set_password(password)
                 instance.user.save()
 
+            if certifications is not None:
+                instance.certifications.set(certifications)
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()

@@ -119,6 +119,25 @@ PATCH /api/employees/employees/{id}/
 { "shift_pattern_preference": "alternating", "height_cm": "178.5" }
 ```
 
+### 2.0 Certifications master list  (`manager` to write, `supervisor` to read)
+
+Custom certification types — the dropdown is NOT fixed; managers add their
+own via this CRUD:
+
+```
+GET/POST  /api/employees/certifications/?search=
+GET/PATCH/DELETE /api/employees/certifications/{id}/
+```
+
+```jsonc
+POST body  { "name": "護理師執照", "code": "RN", "description": "", "is_required": false }
+// name and code are globally unique → 400 on duplicates
+```
+
+Attach to an employee with the write-only `certification_ids` on
+POST/PATCH `/api/employees/employees/{id}/` (full replace — send the
+complete list); read them back from the `certifications` array.
+
 ### 2.1 Availability  (per-employee, bulk-replace)
 
 ```

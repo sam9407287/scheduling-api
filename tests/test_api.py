@@ -469,3 +469,42 @@ class TestSwaggerAPI:
         """ReDoc 可訪問"""
         response = api_client.get('/api/redoc/')
         assert response.status_code == status.HTTP_200_OK
+
+
+class TestEmployeeCertificationAssignment:
+    """certification_ids 是 M2M：create/update 都必須走 .set()（曾直接 setattr 500）。"""
+
+    def _cert(self):
+        from apps.employees.models import Certification
+        return Certification.objects.create(name='證照A', code='CERT-A')
+
+    def test_patch_certification_ids(self, admin_api_client, organization, branch, employee_user):
+        from apps.employees.models import Employee
+        from datetime import date as _d
+        emp = Employee.objects.create(
+            user=employee_user, employee_id='EC1', organization=organization,
+            branch=branch, position='nurse', hire_date=_d(2024, 1, 1),
+        )
+        cert = self._cert()
+        response = admin_api_client.patch(
+            f'/api/employees/employees/{emp.pk}/',
+            {'certification_ids': [cert.pk]}, format='json')
+        assert response.status_code == 200
+        assert [c['id'] for c in response.data['certifications']] == [cert.pk]
+        # 清空也要能運作
+        cleared = admin_api_client.patch(
+            f'/api/employees/employees/{emp.pk}/',
+            {'certification_ids': []}, format='json')
+        assert cleared.status_code == 200
+        assert cleared.data['certifications'] == []
+
+    def test_create_employee_with_certifications(self, admin_api_client, organization, branch):
+        cert = self._cert()
+        response = admin_api_client.post('/api/employees/employees/', {
+            'user': {'username': 'newemp01', 'password': 'pw123456'},
+            'employee_id': 'EC2', 'organization': organization.pk, 'branch': branch.pk,
+            'position': 'nurse', 'hire_date': '2024-01-01',
+            'certification_ids': [cert.pk],
+        }, format='json')
+        assert response.status_code == 201
+        assert [c['id'] for c in response.data['certifications']] == [cert.pk]
