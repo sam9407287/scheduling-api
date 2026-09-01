@@ -119,6 +119,14 @@ PATCH /api/employees/employees/{id}/
 { "shift_pattern_preference": "alternating", "height_cm": "178.5" }
 ```
 
+**Deleting an employee** (`DELETE /api/employees/employees/{id}/`)
+replaces the old resign flow: it atomically removes the employee, their
+LOGIN ACCOUNT, and ALL history (schedules — including approved versions —
+leaves, contracts). Irreversible; past rosters and Excel exports will no
+longer show this person. Show a strong confirm dialog before calling it.
+`is_active` still exists for filtering but is no longer the offboarding
+mechanism.
+
 ### 2.0 Certifications master list  (`manager` to write, `supervisor` to read)
 
 Custom certification types — the dropdown is NOT fixed; managers add their

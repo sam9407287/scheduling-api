@@ -68,6 +68,20 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated()]
         return super().get_permissions()
 
+    def perform_destroy(self, instance):
+        """刪除員工＝連同登入帳號一併刪除（產品決策 2026-09-02：取代離職流程）。
+
+        刪 User 會 CASCADE 到 Employee 及其所有歷史資料（班表/請假/契約）。
+        若 Employee 無對應 User（防禦），退回只刪 Employee。
+        """
+        from django.db import transaction
+        with transaction.atomic():
+            user = instance.user
+            if user is not None:
+                user.delete()  # cascades to Employee + history
+            else:
+                instance.delete()
+
     def get_serializer_class(self):
         if self.action == 'list':
             return EmployeeListSerializer

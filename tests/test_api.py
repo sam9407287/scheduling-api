@@ -508,3 +508,65 @@ class TestEmployeeCertificationAssignment:
         }, format='json')
         assert response.status_code == 201
         assert [c['id'] for c in response.data['certifications']] == [cert.pk]
+
+
+class TestEmployeeHardDelete:
+    """刪除員工（取代離職流程）：連同 User 帳號與歷史資料原子性刪除。"""
+
+    def test_delete_removes_user_and_history(self, admin_api_client, organization,
+                                             branch, employee_user, admin_user):
+        from datetime import date as _d
+        from decimal import Decimal
+        from apps.accounts.models import User
+        from apps.employees.models import Employee
+        from apps.schedules.models import Schedule, ScheduleVersion
+        from apps.shifts.models import ShiftTemplate
+
+        emp = Employee.objects.create(
+            user=employee_user, employee_id='DEL1', organization=organization,
+            branch=branch, position='nurse', hire_date=_d(2024, 1, 1),
+        )
+        shift = ShiftTemplate.objects.create(
+            organization=organization, name='早', start_time='08:00',
+            end_time='16:00', min_staff_count=1,
+        )
+        version = ScheduleVersion.objects.create(
+            organization=organization, version_label='V', version_type='actual',
+            period_start=_d(2026, 9, 1), period_end=_d(2026, 9, 30),
+            created_by=admin_user,
+        )
+        Schedule.objects.create(
+            schedule_version=version, employee=emp, shift_template=shift,
+            schedule_date=_d(2026, 9, 10), expected_hours=Decimal('8.00'),
+        )
+        user_pk = employee_user.pk
+
+        response = admin_api_client.delete(f'/api/employees/employees/{emp.pk}/')
+        assert response.status_code == 204
+        assert not Employee.objects.filter(pk=emp.pk).exists()
+        assert not User.objects.filter(pk=user_pk).exists()  # 帳號不留孤兒
+        assert not Schedule.objects.filter(employee_id=emp.pk).exists()
+
+    def test_org_isolation_on_delete(self, admin_api_client, employee_user, branch):
+        """他機構的 supervisor 不可刪本機構員工（queryset 隔離 → 404）。"""
+        from datetime import date as _d
+        from apps.accounts.models import Role, User
+        from apps.employees.models import Employee
+        from apps.organizations.models import Organization
+        from rest_framework.test import APIClient
+
+        other_org = Organization.objects.create(
+            name='他機構', code='OTHERX', address='x', phone='02', email='x@y.z')
+        role = Role.objects.create(name='manager', permissions={})
+        outsider = User.objects.create_user(
+            username='outsider', password='pw', role=role, organization=other_org)
+        client = APIClient(); client.force_authenticate(user=outsider)
+
+        emp = Employee.objects.create(
+            user=employee_user, employee_id='ISO1',
+            organization=employee_user.organization, branch=branch,
+            position='nurse', hire_date=_d(2024, 1, 1),
+        )
+        response = client.delete(f'/api/employees/employees/{emp.pk}/')
+        assert response.status_code == 404
+        assert Employee.objects.filter(pk=emp.pk).exists()
