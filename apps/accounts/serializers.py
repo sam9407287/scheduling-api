@@ -37,6 +37,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     # 前端不得用 username/姓名去員工列表猜測（LEAVE_V2 P0）。
     employee_pk = serializers.SerializerMethodField()
     employee_code = serializers.SerializerMethodField()
+    firebase_linked = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -44,7 +45,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'role_name', 'organization', 'organization_name',
             'branch', 'branch_name', 'employee_pk', 'employee_code',
-            'phone', 'is_active'
+            'firebase_linked', 'phone', 'is_active'
         ]
 
     def get_employee_pk(self, obj):
@@ -54,6 +55,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_employee_code(self, obj):
         profile = getattr(obj, 'employee_profile', None)
         return profile.employee_id if profile else None
+
+    def get_firebase_linked(self, obj):
+        return bool(obj.firebase_uid)
 
 
 class LoginSerializer(serializers.Serializer):

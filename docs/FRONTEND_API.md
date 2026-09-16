@@ -33,6 +33,16 @@ Authorization: Token <drf-token>               # dev/test (from /auth/login/)
 // 401 → { "error": "帳號或密碼錯誤" }
 ```
 
+### Google login (Firebase)
+
+Send `Authorization: Bearer <firebase-id-token>` — no separate login
+endpoint. MVP behaviour: known uid → that user; verified email matching
+one unbound account → binds (keeps role/org); brand-new account →
+auto-provisioned as a MANAGER with their own fresh Organization (tenant
+isolation). Errors: 401 `invalid_firebase_token`, 403
+`email_not_verified` / `account_inactive`. Details:
+[GOOGLE_LOGIN_FRONTEND_GUIDE.md](./GOOGLE_LOGIN_FRONTEND_GUIDE.md).
+
 ### `GET /api/auth/users/me/`
 
 ```jsonc

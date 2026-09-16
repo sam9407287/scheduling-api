@@ -366,6 +366,7 @@ class TestFirebaseAuthIntegrityError:
         decoded = {
             'uid': 'uid_new_999',
             'email': 'newuser@example.com',
+            'email_verified': True,  # 2026-09-17 起：未驗證 email 拒絕開通
             'name': 'New User',
         }
 
@@ -389,6 +390,7 @@ class TestFirebaseAuthIntegrityError:
         decoded = {
             'uid': 'uid_username_test',
             'email': 'uid_username@example.com',
+            'email_verified': True,
             'name': '',
         }
 
