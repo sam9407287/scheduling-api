@@ -723,6 +723,19 @@ anniversary-year accounting; only APPROVED `annual` requests deduct:
 Schedule rows gained a `"leave"` status choice — render those cells with a
 distinct 請假 style in the roster grid.
 
+## 8.2 Audit logs  (`manager`, read-only)
+
+```
+GET /api/audit/logs/?action=&model_name=&user=&search=&date_from=&date_to=
+GET /api/audit/logs/{id}/          // adds old_data/new_data/ip/user_agent
+```
+
+Every model write is recorded automatically by the audit signal pipeline;
+this API is strictly read-only (mutations → 405). Non-superusers see only
+their own organization's user actions. List items carry
+`{user_name, action(+_display), model_name, record_id, changes, timestamp}`.
+See [AUDIT_LOG_FRONTEND_GUIDE.md](./AUDIT_LOG_FRONTEND_GUIDE.md).
+
 ## 9. Typical call sequence
 
 ```
