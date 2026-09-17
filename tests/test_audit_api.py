@@ -81,3 +81,23 @@ class TestAuditLogAPI:
         row = _log(manager_user)
         assert manager_api_client.post(URL, {}, format='json').status_code == 405
         assert manager_api_client.delete(f'{URL}{row.pk}/').status_code == 405
+
+
+class TestAuditCapturesTokenAuthUser:
+    """API 寫入的稽核必須記到操作者，不能因 DRF 認證時序記成系統。"""
+
+    def test_api_write_logs_acting_user(self, manager_api_client, manager_user,
+                                        monkeypatch, settings):
+        from apps.audit import signals as audit_signals
+        monkeypatch.setattr(audit_signals, '_audit_disabled', False)
+        # 測試設定平常拔掉 audit middleware；這裡補回來模擬生產路徑
+        settings.MIDDLEWARE = settings.MIDDLEWARE + ['apps.audit.middleware.AuditLogMiddleware']
+        response = manager_api_client.post('/api/employees/certifications/', {
+            'name': '稽核測試證照', 'code': 'AUDIT-CERT',
+        }, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        log = AuditLog.objects.filter(
+            model_name='employees.certification', action='create',
+        ).order_by('-timestamp').first()
+        assert log is not None
+        assert log.user == manager_user  # 不是 None（系統）

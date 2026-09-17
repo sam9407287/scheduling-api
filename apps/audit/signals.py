@@ -93,6 +93,13 @@ def audit_post_save(sender, instance, created, **kwargs):
         user = audit_info.get('user')
         ip_address = audit_info.get('ip_address')
         user_agent = audit_info.get('user_agent', '')
+        if user is None:
+            # middleware 在 DRF 認證前抓 user，Token/Firebase 請求當時仍是
+            # 匿名。signal 觸發於 view 執行中，DRF 的 Request.user setter
+            # 已把認證後的 user 回寫到底層 request——此時再取才是操作者。
+            request_user = getattr(request, 'user', None)
+            if request_user is not None and getattr(request_user, 'is_authenticated', False):
+                user = request_user
 
     action = 'create' if created else 'update'
 
@@ -145,6 +152,13 @@ def audit_post_delete(sender, instance, **kwargs):
         user = audit_info.get('user')
         ip_address = audit_info.get('ip_address')
         user_agent = audit_info.get('user_agent', '')
+        if user is None:
+            # middleware 在 DRF 認證前抓 user，Token/Firebase 請求當時仍是
+            # 匿名。signal 觸發於 view 執行中，DRF 的 Request.user setter
+            # 已把認證後的 user 回寫到底層 request——此時再取才是操作者。
+            request_user = getattr(request, 'user', None)
+            if request_user is not None and getattr(request_user, 'is_authenticated', False):
+                user = request_user
 
     old_data = serialize_model(instance)
 
