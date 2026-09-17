@@ -162,3 +162,26 @@ class ComplianceCheckViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = ComplianceCheckSerializer(compliance_check)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class HolidayViewSet(viewsets.ModelViewSet):
+    """機構國定假日表（勞基法 §37）。排在假日的班次由合規檢查給 soft 提醒。"""
+    serializer_class = None  # set below to avoid import order issues
+    permission_classes = [IsManager]
+
+    def get_serializer_class(self):
+        from .serializers import HolidaySerializer
+        return HolidaySerializer
+
+    def get_queryset(self):
+        from .models import Holiday
+        queryset = Holiday.objects.all()
+        if not self.request.user.is_superuser:
+            if self.request.user.organization:
+                queryset = queryset.filter(organization=self.request.user.organization)
+            else:
+                return queryset.none()
+        year = self.request.query_params.get('year')
+        if year:
+            queryset = queryset.filter(date__year=year)
+        return queryset

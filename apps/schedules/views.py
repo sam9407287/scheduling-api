@@ -213,6 +213,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             'max_weekly_hours': 40,
             'min_rest_hours': 11,
             'max_consecutive_days': 6,
+            'max_daily_total_hours': 12,
         }
         # 優先序：預設 8 < org ShiftRule < request constraints
         from apps.shifts.rules import resolve_max_daily_hours

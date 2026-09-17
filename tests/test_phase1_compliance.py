@@ -35,6 +35,7 @@ def _shift(org, name, start, end):
     return ShiftTemplate.objects.create(
         organization=org, name=name,
         start_time=start, end_time=end,
+        break_minutes=60,  # §35 補全後 >4h 班需有休息，清潔前提
         min_staff_count=1,
     )
 

@@ -338,7 +338,12 @@ on a date.
 POST /api/schedules/versions/{id}/check-compliance/
 // optional body:
 { "rules": { "max_weekly_hours": 40, "max_daily_hours": 8,
-             "min_rest_hours": 11, "max_consecutive_days": 6 },
+             "min_rest_hours": 11, "max_consecutive_days": 6,
+             // 2026-09-18 勞基法補全 (defaults shown):
+             "max_daily_total_hours": 12,        // §32 normal+OT hard cap
+             "max_monthly_overtime_hours": 46,   // §32 monthly OT (hard)
+             "weekly_rest_days": 2,              // §36 一例一休 (soft by default)
+             "min_break_minutes": 30 },          // §35 >4h shift break (soft)
   "soft_rule_types": ["max_weekly_hours"] }   // optional override
 
 // 200
@@ -362,6 +367,23 @@ POST /api/schedules/versions/{id}/check-compliance/
 }
 ```
 Render each violation on the cell keyed by `(employee_pk, schedule_date, shift_template_id)`.
+
+New rule codes (labels come back in `rule_label`, already 中文):
+`max_daily_total_hours` / `max_monthly_overtime_hours` are HARD by default;
+`weekly_rest_days` / `min_break_minutes` / `holiday_scheduling` come back
+with `severity: "soft"` by default (legal with overtime pay / consent) —
+render amber, never block. `holiday_scheduling` fires from the org holiday
+table:
+
+```
+GET/POST /api/compliance/holidays/?year=2026     (manager)
+GET/PATCH/DELETE /api/compliance/holidays/{id}/
+POST body { "organization": 1, "date": "2026-10-10", "name": "國慶日" }
+// (organization, date) unique → 400 on duplicates
+```
+
+All rule evaluation is BACKEND-only — the frontend renders returned
+violations and must not re-derive rule logic client-side.
 
 ### 4.2 Derive A from B  (charges tokens)
 

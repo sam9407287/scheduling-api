@@ -56,3 +56,11 @@ class ComplianceCheckSerializer(serializers.ModelSerializer):
             'checked_at', 'notes'
         ]
         read_only_fields = ['id', 'checked_at']
+
+
+class HolidaySerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import Holiday
+        model = Holiday
+        fields = ['id', 'organization', 'date', 'name', 'created_at']
+        read_only_fields = ['id', 'created_at']

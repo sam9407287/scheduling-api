@@ -1002,6 +1002,18 @@ class ORToolsProvider(BaseScheduleProvider):
                             else:
                                 model.Add(a_var + b_var <= 1)
 
+        # --- 3b. §32 absolute daily cap: normal + overtime <= 12h (always hard) ---
+        max_daily_total_minutes = int(round(
+            float(constraints.get('max_daily_total_hours', 12)) * 60
+        ))
+        for emp in employees:
+            emp_id = emp['id']
+            for day_idx in range(num_days):
+                model.Add(sum(
+                    shift_minutes[s['id']] * assignments[emp_id][day_idx][s['id']]
+                    for s in shifts
+                ) <= max_daily_total_minutes)
+
         # --- 4. daily hours (multi-shift days must stay within the cap) ---
         max_daily_minutes = int(round(
             float(constraints.get('max_daily_hours', 8)) * 60

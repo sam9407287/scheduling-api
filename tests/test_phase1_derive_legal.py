@@ -35,6 +35,7 @@ def _shift(org, name, start, end, **kw):
     return ShiftTemplate.objects.create(
         organization=org, name=name,
         start_time=start, end_time=end,
+        break_minutes=60,  # §35 補全後 >4h 班需有休息，清潔前提
         min_staff_count=kw.pop('min_staff_count', 1),
         **kw,
     )
@@ -336,7 +337,10 @@ class TestDeriveLegalEndpoint:
         check_resp = admin_api_client.post(
             f'/api/schedules/versions/{new_id}/check-compliance/',
             {'rules': {'max_consecutive_days': 6, 'max_weekly_hours': 999,
-                       'min_rest_hours': 0, 'max_daily_hours': 24}},
+                       'min_rest_hours': 0, 'max_daily_hours': 24,
+                       # 隔離測連續天數：中和 2026-09-18 勞基法補全的新規則
+                       'max_daily_total_hours': 24, 'max_monthly_overtime_hours': 999,
+                       'weekly_rest_days': 0, 'min_break_minutes': 0}},
             format='json',
         )
         assert check_resp.status_code == 200

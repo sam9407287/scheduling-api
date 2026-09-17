@@ -37,6 +37,12 @@ RULE_LABELS_ZH = {
     'max_consecutive_days': '連續工作天數超標',
     'min_rest_hours':       '兩班間隔不足',
     'max_daily_hours':      '單日工時超標',
+    # 勞基法補全（2026-09-18，依 §32/§35/§36/§37）
+    'max_daily_total_hours':      '單日含加班總工時超過12小時',
+    'max_monthly_overtime_hours': '單月加班時數超標',
+    'weekly_rest_days':           '每七日未足二日休息',
+    'min_break_minutes':          '連續工作四小時未安排休息',
+    'holiday_scheduling':         '國定假日出勤（工資應加倍）',
 }
 
 
@@ -135,6 +141,11 @@ DEFAULT_RULES = {
     'min_rest_hours': 11,
     'max_consecutive_days': 6,
     'mandatory_rest_day': 1,
+    # 勞基法補全（§32/§35/§36）
+    'max_daily_total_hours': 12,        # 正常+延長 一日上限（§32-2）
+    'max_monthly_overtime_hours': 46,   # 延長工時每月上限（§32-2）
+    'weekly_rest_days': 2,              # 每七日應有二日休息（§36）
+    'min_break_minutes': 30,            # 連續工作4h應有30分休息（§35）
 }
 
 
@@ -188,6 +199,25 @@ def check_schedule_violations(
         violations.extend(_check_daily_hours(
             employee, emp_schedules, rules.get('max_daily_hours', 8)
         ))
+        violations.extend(_check_daily_total_hours(
+            employee, emp_schedules, rules.get('max_daily_total_hours', 12)
+        ))
+        violations.extend(_check_monthly_overtime(
+            employee, emp_schedules,
+            rules.get('max_monthly_overtime_hours', 46),
+            normal_daily=float(rules.get('max_daily_hours', 8)),
+        ))
+        violations.extend(_check_weekly_rest_days(
+            employee, emp_schedules,
+            int(rules.get('weekly_rest_days', 2)),
+            schedule_version.period_start, schedule_version.period_end,
+        ))
+        violations.extend(_check_break_minutes(
+            employee, emp_schedules, int(rules.get('min_break_minutes', 30))
+        ))
+
+    # 國定假日出勤（§37/§39）：跨員工一次查表
+    violations.extend(_check_holidays(schedules, schedule_version))
 
     # Label severity in one pass: rules the org marked soft become 'soft',
     # everything else stays 'hard'. All violations are returned either way.
@@ -485,3 +515,226 @@ class ComplianceEngine:
             violations=violations,
             warnings=warnings,
         )
+
+
+# ===========================================================================
+# 勞基法補全（2026-09-18）：§32 / §35 / §36 / §37
+# 硬性程度設計：§32 兩條為 hard（絕對上限）；§35/§36 第二休息日/§37 假日
+# 出勤在法律上有徵得同意/加倍給付的空間，預設 soft 提醒不阻擋。
+# ===========================================================================
+
+def _check_daily_total_hours(
+    employee: Employee,
+    schedules: List[Schedule],
+    max_hours: float,
+) -> List[Violation]:
+    """§32：正常＋延長工時一日不得超過 12 小時（絕對上限，hard）。"""
+    by_day: Dict[date, List[Schedule]] = {}
+    for s in schedules:
+        by_day.setdefault(s.schedule_date, []).append(s)
+
+    out: List[Violation] = []
+    for day, day_schedules in by_day.items():
+        total = sum(float(s.expected_hours) for s in day_schedules)
+        if total <= max_hours:
+            continue
+        day_schedules.sort(key=lambda s: s.shift_template.start_time)
+        trigger = day_schedules[-1]
+        out.append(Violation(
+            rule='max_daily_total_hours',
+            severity='hard',
+            employee_pk=employee.pk,
+            employee_code=employee.employee_id,
+            employee_name=_employee_name(employee),
+            schedule_date=day.isoformat(),
+            shift_template_id=trigger.shift_template_id,
+            related_dates=[],
+            detail={'total_hours': round(total, 2), 'max_hours': max_hours},
+        ))
+    return out
+
+
+def _check_monthly_overtime(
+    employee: Employee,
+    schedules: List[Schedule],
+    max_overtime_hours: float,
+    normal_daily: float,
+) -> List[Violation]:
+    """§32：延長工時（單日超過正常工時的部分）每月不得超過 46 小時。
+
+    以「單日總工時 − 正常工時上限」的正數部分累計為當月加班時數。
+    """
+    by_day: Dict[date, float] = {}
+    last_cell_of_day: Dict[date, Schedule] = {}
+    for s in schedules:
+        by_day[s.schedule_date] = by_day.get(s.schedule_date, 0.0) + float(s.expected_hours)
+        prev = last_cell_of_day.get(s.schedule_date)
+        if prev is None or s.shift_template.start_time > prev.shift_template.start_time:
+            last_cell_of_day[s.schedule_date] = s
+
+    monthly: Dict[str, float] = {}
+    ot_days: Dict[str, List[date]] = {}
+    for day, total in by_day.items():
+        overtime = max(0.0, total - normal_daily)
+        if overtime <= 0:
+            continue
+        key = day.strftime('%Y-%m')
+        monthly[key] = monthly.get(key, 0.0) + overtime
+        ot_days.setdefault(key, []).append(day)
+
+    out: List[Violation] = []
+    for month, overtime_total in monthly.items():
+        if overtime_total <= max_overtime_hours:
+            continue
+        days = sorted(ot_days[month])
+        trigger = last_cell_of_day[days[-1]]
+        out.append(Violation(
+            rule='max_monthly_overtime_hours',
+            severity='hard',
+            employee_pk=employee.pk,
+            employee_code=employee.employee_id,
+            employee_name=_employee_name(employee),
+            schedule_date=days[-1].isoformat(),
+            shift_template_id=trigger.shift_template_id,
+            related_dates=[d.isoformat() for d in days[:-1]],
+            detail={
+                'month': month,
+                'overtime_hours': round(overtime_total, 2),
+                'max_overtime_hours': max_overtime_hours,
+            },
+        ))
+    return out
+
+
+def _check_weekly_rest_days(
+    employee: Employee,
+    schedules: List[Schedule],
+    required_rest_days: int,
+    period_start: date,
+    period_end: date,
+) -> List[Violation]:
+    """§36：勞工每七日中應有二日之休息（一例一休）。
+
+    只檢查「版本期間完整涵蓋」的 ISO 週（週一~週日），避免期間頭尾的
+    不完整週產生假警報。soft：休息日出勤法律允許（需加班費），僅提醒。
+    """
+    if not schedules:
+        return []
+    worked_days_by_week: Dict[date, set] = {}
+    cells_by_week: Dict[date, List[Schedule]] = {}
+    for s in schedules:
+        wk = s.schedule_date - timedelta(days=s.schedule_date.weekday())
+        worked_days_by_week.setdefault(wk, set()).add(s.schedule_date)
+        cells_by_week.setdefault(wk, []).append(s)
+
+    out: List[Violation] = []
+    for week_start, worked_days in worked_days_by_week.items():
+        week_end = week_start + timedelta(days=6)
+        if week_start < period_start or week_end > period_end:
+            continue  # 不完整週不判
+        rest_days = 7 - len(worked_days)
+        if rest_days >= required_rest_days:
+            continue
+        cells = sorted(
+            cells_by_week[week_start],
+            key=lambda s: (s.schedule_date, s.shift_template.start_time),
+        )
+        trigger = cells[-1]
+        out.append(Violation(
+            rule='weekly_rest_days',
+            severity='soft',
+            employee_pk=employee.pk,
+            employee_code=employee.employee_id,
+            employee_name=_employee_name(employee),
+            schedule_date=trigger.schedule_date.isoformat(),
+            shift_template_id=trigger.shift_template_id,
+            related_dates=[
+                s.schedule_date.isoformat() for s in cells[:-1]
+            ],
+            detail={
+                'week_start': week_start.isoformat(),
+                'rest_days': rest_days,
+                'required_rest_days': required_rest_days,
+            },
+        ))
+    return out
+
+
+def _check_break_minutes(
+    employee: Employee,
+    schedules: List[Schedule],
+    required_break_minutes: int,
+) -> List[Violation]:
+    """§35：繼續工作四小時至少應有三十分鐘休息。
+
+    以班別模板設定判斷：時段跨度 > 4 小時且 break_minutes 不足者提醒。
+    輪班/連續性工作法律允許另行調配，預設 soft。
+    """
+    out: List[Violation] = []
+    seen_cells = set()
+    for s in schedules:
+        template = s.shift_template
+        span_start = template.start_time
+        span_end = template.end_time
+        span_minutes = (span_end.hour * 60 + span_end.minute) - (span_start.hour * 60 + span_start.minute)
+        if span_minutes <= 0:
+            span_minutes += 24 * 60  # 跨午夜
+        if span_minutes <= 4 * 60:
+            continue
+        if (template.break_minutes or 0) >= required_break_minutes:
+            continue
+        key = (s.schedule_date, template.pk)
+        if key in seen_cells:
+            continue
+        seen_cells.add(key)
+        out.append(Violation(
+            rule='min_break_minutes',
+            severity='soft',
+            employee_pk=employee.pk,
+            employee_code=employee.employee_id,
+            employee_name=_employee_name(employee),
+            schedule_date=s.schedule_date.isoformat(),
+            shift_template_id=template.pk,
+            related_dates=[],
+            detail={
+                'shift_span_minutes': span_minutes,
+                'break_minutes': template.break_minutes or 0,
+                'required_break_minutes': required_break_minutes,
+            },
+        ))
+    return out
+
+
+def _check_holidays(
+    schedules: List[Schedule],
+    schedule_version: ScheduleVersion,
+) -> List[Violation]:
+    """§37/§39：國定假日出勤——不違法但工資應加倍，soft 提醒。"""
+    from .models import Holiday
+    holidays = {
+        h.date: h.name
+        for h in Holiday.objects.filter(
+            organization=schedule_version.organization,
+            date__gte=schedule_version.period_start,
+            date__lte=schedule_version.period_end,
+        )
+    }
+    if not holidays:
+        return []
+    out: List[Violation] = []
+    for s in schedules:
+        name = holidays.get(s.schedule_date)
+        if not name:
+            continue
+        out.append(Violation(
+            rule='holiday_scheduling',
+            severity='soft',
+            employee_pk=s.employee.pk,
+            employee_code=s.employee.employee_id,
+            employee_name=_employee_name(s.employee),
+            schedule_date=s.schedule_date.isoformat(),
+            shift_template_id=s.shift_template_id,
+            related_dates=[],
+            detail={'holiday_name': name},
+        ))
+    return out

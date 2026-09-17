@@ -133,3 +133,29 @@ class ComplianceCheck(models.Model):
 
     def __str__(self):
         return f"{self.organization.name} - {self.get_check_type_display()} ({self.get_status_display()})"
+
+
+class Holiday(models.Model):
+    """機構的國定假日/應放假日（勞基法 §37）。
+
+    排班排在假日不是違法（§39 徵得同意加倍給付即可），因此合規檢查
+    以 soft 提醒呈現，讓管理者知道要加倍給薪，不阻擋排班。
+    """
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='holidays',
+        verbose_name='所屬機構'
+    )
+    date = models.DateField(verbose_name='日期')
+    name = models.CharField(max_length=100, verbose_name='假日名稱')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = '國定假日'
+        verbose_name_plural = '國定假日'
+        unique_together = [['organization', 'date']]
+        ordering = ['date']
+
+    def __str__(self):
+        return f"{self.date} {self.name}"
