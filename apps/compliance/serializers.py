@@ -14,8 +14,20 @@ VALID_RULE_TYPES = {
 class OrgComplianceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrgComplianceSettings
-        fields = ['id', 'organization', 'soft_rule_types', 'created_at', 'updated_at']
+        fields = ['id', 'organization', 'soft_rule_types', 'weekly_closed_days',
+                  'created_at', 'updated_at']
         read_only_fields = ['id', 'organization', 'created_at', 'updated_at']
+
+    def validate_weekly_closed_days(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('weekly_closed_days must be a list')
+        if any(not isinstance(d, int) or d < 0 or d > 6 for d in value):
+            raise serializers.ValidationError(
+                'weekly_closed_days entries must be integers 0(Mon)–6(Sun)'
+            )
+        if len(value) >= 7:
+            raise serializers.ValidationError('cannot close every day of the week')
+        return sorted(set(value))
 
     def validate_soft_rule_types(self, value):
         if not isinstance(value, list):

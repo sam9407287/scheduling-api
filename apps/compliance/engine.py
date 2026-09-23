@@ -43,6 +43,7 @@ RULE_LABELS_ZH = {
     'weekly_rest_days':           '每七日未足二日休息',
     'min_break_minutes':          '連續工作四小時未安排休息',
     'holiday_scheduling':         '國定假日出勤（工資應加倍）',
+    'org_closed_day':             '機構公休日排班',
 }
 
 
@@ -218,6 +219,9 @@ def check_schedule_violations(
 
     # 國定假日出勤（§37/§39）：跨員工一次查表
     violations.extend(_check_holidays(schedules, schedule_version))
+
+    # 機構公休日（PM#1 排休）：手動排班可排但以 soft 提醒
+    violations.extend(_check_org_closed_days(schedules, schedule_version))
 
     # Label severity in one pass: rules the org marked soft become 'soft',
     # everything else stays 'hard'. All violations are returned either way.
@@ -736,5 +740,39 @@ def _check_holidays(
             shift_template_id=s.shift_template_id,
             related_dates=[],
             detail={'holiday_name': name},
+        ))
+    return out
+
+
+WEEKDAY_ZH = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+
+
+def _check_org_closed_days(
+    schedules: List[Schedule],
+    schedule_version: ScheduleVersion,
+) -> List[Violation]:
+    """機構公休日（PM#1）：排在每週公休日的班以 soft 提醒，不阻擋。"""
+    from .models import OrgComplianceSettings
+    cfg = OrgComplianceSettings.objects.filter(
+        organization=schedule_version.organization,
+    ).first()
+    closed = set(cfg.weekly_closed_days or []) if cfg else set()
+    if not closed:
+        return []
+    out: List[Violation] = []
+    for s in schedules:
+        dow = s.schedule_date.weekday()
+        if dow not in closed:
+            continue
+        out.append(Violation(
+            rule='org_closed_day',
+            severity='soft',
+            employee_pk=s.employee.pk,
+            employee_code=s.employee.employee_id,
+            employee_name=_employee_name(s.employee),
+            schedule_date=s.schedule_date.isoformat(),
+            shift_template_id=s.shift_template_id,
+            related_dates=[],
+            detail={'weekday': dow, 'weekday_label': WEEKDAY_ZH[dow]},
         ))
     return out

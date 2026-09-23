@@ -325,12 +325,15 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         # Soft labour-law rules (PR11): caller override else org config.
         from apps.compliance.models import OrgComplianceSettings
+        cfg = OrgComplianceSettings.objects.filter(organization_id=org_id).first()
         soft_labor_rules = data.get('soft_rule_types')
         if soft_labor_rules is None:
-            cfg = OrgComplianceSettings.objects.filter(
-                organization_id=org_id
-            ).first()
             soft_labor_rules = cfg.soft_rule_types if cfg else []
+        # 機構每週公休日（PM#1）：solver 硬性避開
+        if 'closed_weekdays' not in request_constraints:
+            request_constraints['closed_weekdays'] = (
+                cfg.weekly_closed_days if cfg else []
+            )
 
         schedule_request = ScheduleRequest(
             organization_id=org_id,

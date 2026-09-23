@@ -70,6 +70,13 @@ class OrgComplianceSettings(models.Model):
         default=list, blank=True,
         verbose_name='軟性規則類型（其餘視為硬性）',
     )
+    # 機構每週公休日（PM#1 排休）：Python weekday 整數，0=週一…6=週日。
+    # 例：診所固定週日公休 → [6]。AI 排班完全避開；手動排班仍可排，
+    # 但一鍵合規檢查會以 soft 提醒（org_closed_day）。
+    weekly_closed_days = models.JSONField(
+        default=list, blank=True,
+        verbose_name='每週公休日（0=週一…6=週日）',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

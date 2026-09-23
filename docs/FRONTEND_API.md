@@ -614,11 +614,23 @@ GET/PATCH /api/compliance/settings/       // soft vs hard rule config
 ```
 
 ```jsonc
-GET  /api/compliance/settings/  → { "soft_rule_types": ["max_weekly_hours"] }
+GET  /api/compliance/settings/  → { "soft_rule_types": ["max_weekly_hours"],
+                                    "weekly_closed_days": [6] }
 PATCH same { "soft_rule_types": ["max_weekly_hours", "min_rest_hours"] }
 // valid keys: max_weekly_hours, max_consecutive_days, min_rest_hours, max_daily_hours
 // 400 on unknown keys
 ```
+
+**機構公休日（排休，2026-09-23 / PM#1）** — `weekly_closed_days`：
+
+- 整數清單，**0=週一 … 6=週日**（例：診所固定週日公休 → `[6]`）。
+  PATCH 會自動去重排序；超出 0–6 或整週全休 → 400。
+- 行為（警告哲學）：**手動排班仍可排**，但一鍵合規檢查（§4.1）會對公休日
+  的格子回 soft violation `org_closed_day`（`rule_label`「機構公休日排班」、
+  `detail.weekday_label` 如「週日」）；**AI 排班（§5、§5.1）與派生合規版
+  （§4.2）完全避開公休日**——LLM 模式排進公休日的列會進 `rejected`
+  （reason「機構公休日」），min_staff 缺口警告也不計公休日。
+- 前端建議：班表把公休日欄位灰底；設定 UI 用七顆 checkbox。
 
 ---
 

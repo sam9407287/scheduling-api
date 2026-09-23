@@ -509,8 +509,22 @@ class ORToolsProvider(BaseScheduleProvider):
         """加入硬約束"""
         num_days = len(days)
 
-        # 1. 每個班別每天至少需要 min_staff_count 人
+        # 0. 機構每週公休日（PM#1 排休，0=週一…6=週日）：公休日全班別
+        #    禁排，且該日不套 min_staff（否則必然 INFEASIBLE）。
+        closed_weekdays = set(constraints.get('closed_weekdays') or [])
+        closed_day_idx = {
+            day_idx for day_idx in range(num_days)
+            if days[day_idx].weekday() in closed_weekdays
+        }
+        for day_idx in closed_day_idx:
+            for emp in employees:
+                for shift in shifts:
+                    model.Add(assignments[emp['id']][day_idx][shift['id']] == 0)
+
+        # 1. 每個班別每天至少需要 min_staff_count 人（公休日除外）
         for day_idx in range(num_days):
+            if day_idx in closed_day_idx:
+                continue
             for shift in shifts:
                 shift_id = shift['id']
                 min_staff = shift.get('min_staff_count', 1)

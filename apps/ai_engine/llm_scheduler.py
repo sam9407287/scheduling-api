@@ -5,7 +5,7 @@ validation layer — every row the model emits is checked against reality
 (employee/shift exist in org, date in period, certifications, approved
 leave, duplicates); invalid rows are dropped and reported, never written.
 """
-from datetime import timedelta
+from datetime import date as date_cls, timedelta
 
 from apps.employees.models import Employee
 from apps.leaves.solver_dates import approved_leave_dates
@@ -19,6 +19,7 @@ SYSTEM_PROMPT = """你是排班助手。根據提供的員工、班別與規則�
 2. 每個班別每天至少排滿 min_staff 人。
 3. 員工缺少班別要求的證照(required_cert_ids)時，不可排入該班別。
 4. 不可排在員工的請假日(leave_dates)或每週不可排星期(blocked_weekdays, 0=週一)。
+   也不可排在機構公休日(org.closed_weekdays, 0=週一)，公休日整天不排任何班。
 5. 同一員工同一天不可排時間重疊的班別；每人每日總工時不超過 12 小時。
 6. 盡量遵守：優先排 priority 名單靠前的員工；每人每週工時接近 weekly_hours；
    每人每 7 天至少休 1 天、連續工作不超過 6 天。
@@ -45,6 +46,13 @@ def build_context(version, period_start, period_end):
     emp_ids = [e.pk for e in employees]
     leave_map = approved_leave_dates(emp_ids, period_start, period_end)
 
+    # 機構每週公休日（PM#1 排休）
+    from apps.compliance.models import OrgComplianceSettings
+    cfg = OrgComplianceSettings.objects.filter(
+        organization=version.organization,
+    ).first()
+    closed_weekdays = sorted(set(cfg.weekly_closed_days or [])) if cfg else []
+
     blocked_weekdays = {}
     for emp in employees:
         try:
@@ -64,6 +72,7 @@ def build_context(version, period_start, period_end):
     payload = {
         'period': {'start': period_start.isoformat(), 'end': period_end.isoformat(),
                    'dates': [d.isoformat() for d in days]},
+        'org': {'closed_weekdays': closed_weekdays},
         'employees': [
             {
                 'employee_id': e.pk,
@@ -98,6 +107,7 @@ def build_context(version, period_start, period_end):
         'leave_map': leave_map,
         'blocked_weekdays': blocked_weekdays,
         'dates': {d.isoformat() for d in days},
+        'closed_weekdays': set(closed_weekdays),
     }
     return payload, lookups
 
@@ -139,6 +149,9 @@ def validate_assignments(raw, lookups, version):
         if date_str in lookups['leave_map'].get(emp_id, []):
             rejected.append({'row': row, 'reason': '該日已核准請假'})
             continue
+        if date_cls.fromisoformat(date_str).weekday() in lookups.get('closed_weekdays', set()):
+            rejected.append({'row': row, 'reason': '機構公休日'})
+            continue
         key = (emp_id, date_str, shift_id)
         if key in seen or key in existing:
             rejected.append({'row': row, 'reason': '重複班次（已存在或模型重複輸出）'})
@@ -154,7 +167,10 @@ def coverage_warnings(valid_rows, lookups):
     for row in valid_rows:
         count[(row['date'], row['shift'].pk)] = count.get((row['date'], row['shift'].pk), 0) + 1
     warnings = []
+    closed = lookups.get('closed_weekdays', set())
     for date_str in sorted(lookups['dates']):
+        if date_cls.fromisoformat(date_str).weekday() in closed:
+            continue  # 公休日本來就不該有人，不算缺口
         for shift in lookups['shifts'].values():
             got = count.get((date_str, shift.pk), 0)
             if got < shift.min_staff_count:

@@ -224,12 +224,17 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
 
         # Soft labour-law rules (PR11): caller override else org config.
         from apps.compliance.models import OrgComplianceSettings
+        cfg = OrgComplianceSettings.objects.filter(
+            organization=b_version.organization
+        ).first()
         soft_labor_rules = body.get('soft_rule_types')
         if soft_labor_rules is None:
-            cfg = OrgComplianceSettings.objects.filter(
-                organization=b_version.organization
-            ).first()
             soft_labor_rules = cfg.soft_rule_types if cfg else []
+        # 機構每週公休日（PM#1）：派生 A 也硬性避開（公休日不該有班）
+        if 'closed_weekdays' not in labor_law_defaults:
+            labor_law_defaults['closed_weekdays'] = (
+                cfg.weekly_closed_days if cfg else []
+            )
 
         schedule_request = ScheduleRequest(
             organization_id=b_version.organization_id,
