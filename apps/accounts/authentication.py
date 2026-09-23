@@ -48,12 +48,13 @@ class FirebaseAuthentication(authentication.BaseAuthentication):
     """Firebase JWT authentication with MVP self-service provisioning.
 
     Product decision (2026-09-17, MVP): every Google login IS a manager.
+    Updated 2026-09-23: no auto-created Organization — the new manager
+    lands with organization=None and creates their own org in-app
+    (POST /api/organizations/organizations/ binds it to them).
     - Known firebase_uid → that user.
     - Verified email matching exactly one existing user → bind uid to it
       (keeps their role/organization — e.g. pre-created admin accounts).
-    - Otherwise → auto-provision: a fresh Organization (their own isolated
-      tenant) + a manager-role User. Org isolation does the rest: each
-      Google account only ever sees its own organization's data.
+    - Otherwise → auto-provision a manager-role User with no organization.
 
     Error contract (per GOOGLE_LOGIN handoff §9):
       401 invalid_firebase_token / 403 email_not_verified / 403 account_inactive
@@ -116,35 +117,25 @@ class FirebaseAuthentication(authentication.BaseAuthentication):
                 user.save(update_fields=['firebase_uid'])
                 return user
 
-        # MVP 自助開通：全新 Google 帳號 → 自己的機構 + manager 角色。
-        # 機構隔離保證他只看得到自己這個空白租戶的資料。
-        from django.db import transaction
-        from apps.organizations.models import Organization
-
+        # MVP 自助開通：全新 Google 帳號 → manager 角色、無機構。
+        # 機構由使用者進系統後自行建立（POST organizations 會綁回自己），
+        # 建好前 organization=None，各資源列表為空、前端導向建立機構頁。
         name = decoded_token.get('name', '')
         name_parts = name.split() if name else []
-        display = name or (email.split('@')[0] if email else firebase_uid[:8])
 
         try:
-            with transaction.atomic():
-                organization = Organization.objects.create(
-                    name=f'{display} 的機構',
-                    # 完整 uid 保證唯一（Firebase uid ≤ 36 字元，欄位上限 50）
-                    code=f'G-{firebase_uid.upper()}'[:50],
-                    email=email,
-                )
-                manager_role, _ = Role.objects.get_or_create(
-                    name='manager', defaults={'description': '管理者', 'permissions': {}},
-                )
-                user = User.objects.create_user(
-                    username=firebase_uid,
-                    email=email,
-                    firebase_uid=firebase_uid,
-                    first_name=name_parts[0] if name_parts else '',
-                    last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
-                    role=manager_role,
-                    organization=organization,
-                )
+            manager_role, _ = Role.objects.get_or_create(
+                name='manager', defaults={'description': '管理者', 'permissions': {}},
+            )
+            user = User.objects.create_user(
+                username=firebase_uid,
+                email=email,
+                firebase_uid=firebase_uid,
+                first_name=name_parts[0] if name_parts else '',
+                last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                role=manager_role,
+                organization=None,
+            )
         except IntegrityError:
             # 並發：同一 firebase_uid 同時首登，取已建立者
             user = User.objects.filter(firebase_uid=firebase_uid).first()

@@ -5,9 +5,9 @@
 
 ## 一、MVP 產品決策（與你文件的差異）
 
-Sam 拍板：**MVP 階段任何 Google 帳號登入都直接成為 manager**，
-每個帳號自動獲得**自己的全新機構（獨立租戶）**，靠既有機構隔離
-看不到別人的資料。因此：
+Sam 拍板：**MVP 階段任何 Google 帳號登入都直接成為 manager**。
+（2026-09-23 更新）**不再自動開機構**——新帳號進系統後自己建立機構，
+建立的機構自動綁定為該帳號的租戶，靠既有機構隔離看不到別人的資料。因此：
 
 - **不做邀請流程**（你文件 §7 的 invitations/link/unlink 全部不做）——
   使用者只有管理者、量小，且後端目前沒有真實寄信服務。
@@ -24,8 +24,10 @@ Sam 拍板：**MVP 階段任何 Google 帳號登入都直接成為 manager**，
 2. **首次登入，verified email 恰好對到一個未綁定的既有帳號** →
    回填 `firebase_uid` 綁定，**保留原本的 role / organization / branch**
    （例：Sam 預建的 admin 帳號用 Google 登入後仍是 admin）。
-3. **全新帳號** → 自動開通：建立新 Organization（code `G-<UID>`）＋
-   manager 角色 User。該帳號從此只看得到自己機構的資料。
+3. **全新帳號** → 建立 manager 角色 User，**`organization` 為 null**
+   （2026-09-23 起不再自動開機構）。前端導向「建立機構」頁，
+   `POST /api/organizations/organizations/` 建立後自動綁定（詳
+   FRONTEND_API.md §1）。該帳號從此只看得到自己機構的資料。
 4. 檢查 `is_active`，停用帳號一律拒絕。
 
 錯誤碼（`AuthenticationFailed` detail 為 `{code, message}`）：
@@ -55,9 +57,12 @@ Sam 拍板：**MVP 階段任何 Google 帳號登入都直接成為 manager**，
 
 ## 四、新帳號的空白狀態
 
-自動開通的 manager 進來是**全新空機構**：沒有員工、班別、班表。
-前端首頁請確保空資料時有合理的引導畫面（建員工/建班別的入口），
-不要白屏。
+（2026-09-23 更新）新 manager 進來時 `/me` 的 `organization` 是 **null**：
+先導向「建立機構」頁（`POST /api/organizations/organizations/`，body 只需
+`{"name": "..."}`，code 可省略）；已有機構的帳號再建會收 409
+`organization_already_exists`，請隱藏入口。建完機構後仍是**全新空機構**：
+沒有員工、班別、班表，首頁請確保空資料時有合理的引導畫面
+（建員工/建班別的入口），不要白屏。
 
 ## 五、之後要升級時
 

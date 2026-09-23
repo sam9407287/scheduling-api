@@ -4,8 +4,8 @@ Google login (Firebase) MVP provisioning tests.
 Product decision (2026-09-17): every Google login IS a manager.
 - known firebase_uid → existing user
 - verified email matching exactly one unbound user → bind (keeps role/org)
-- brand-new account → auto-provision own Organization + manager User
-  (org isolation = each Google account sees only its own tenant)
+- brand-new account → manager User with NO organization (2026-09-23:
+  the user creates their own org in-app; POST organizations binds it)
 - unverified email → 403 email_not_verified; inactive user → 403
 Firebase verification is mocked — no real credentials needed.
 """
@@ -53,29 +53,20 @@ GOOGLE_PAYLOAD = {
 
 
 class TestAutoProvision:
-    def test_new_google_account_becomes_manager_with_own_org(self, mock_firebase):
+    def test_new_google_account_becomes_manager_without_org(self, mock_firebase):
         user = _authenticate(GOOGLE_PAYLOAD, mock_firebase)
         assert user.firebase_uid == 'google-uid-001'
         assert user.role.name == 'manager'
-        assert user.organization is not None
-        assert user.organization.code == 'G-GOOGLE-UID-001'
+        assert user.organization is None              # 機構進系統後自建
         assert user.email == 'newmanager@gmail.com'
+        assert Organization.objects.count() == 0      # 不再自動開機構
 
-    def test_second_login_reuses_same_user_and_org(self, mock_firebase):
+    def test_second_login_reuses_same_user(self, mock_firebase):
         first = _authenticate(GOOGLE_PAYLOAD, mock_firebase)
         second = _authenticate(GOOGLE_PAYLOAD, mock_firebase)
         assert first.pk == second.pk
-        assert Organization.objects.count() == 1
         assert User.objects.count() == 1
-
-    def test_two_google_accounts_get_isolated_orgs(self, mock_firebase):
-        user_a = _authenticate(GOOGLE_PAYLOAD, mock_firebase)
-        user_b = _authenticate({
-            'uid': 'google-uid-002', 'email': 'other@gmail.com',
-            'email_verified': True, 'name': 'B',
-        }, mock_firebase)
-        assert user_a.organization_id != user_b.organization_id
-        assert Organization.objects.count() == 2
+        assert Organization.objects.count() == 0
 
 
 class TestEmailBinding:

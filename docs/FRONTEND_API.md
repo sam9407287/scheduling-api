@@ -38,10 +38,15 @@ Authorization: Token <drf-token>               # dev/test (from /auth/login/)
 Send `Authorization: Bearer <firebase-id-token>` — no separate login
 endpoint. MVP behaviour: known uid → that user; verified email matching
 one unbound account → binds (keeps role/org); brand-new account →
-auto-provisioned as a MANAGER with their own fresh Organization (tenant
-isolation). Errors: 401 `invalid_firebase_token`, 403
+auto-provisioned as a MANAGER **with NO organization** (2026-09-23：不再
+自動開機構). Errors: 401 `invalid_firebase_token`, 403
 `email_not_verified` / `account_inactive`. Details:
 [GOOGLE_LOGIN_FRONTEND_GUIDE.md](./GOOGLE_LOGIN_FRONTEND_GUIDE.md).
+
+**Onboarding flow（前端要做的）**: after login call `GET /api/auth/users/me/`;
+if `organization` is `null`, route to a「建立機構」page → `POST
+/api/organizations/organizations/` (§1) → refetch `/me` (now bound) →
+enter the app. While `organization` is null every org-scoped list is empty.
 
 ### `GET /api/auth/users/me/`
 
@@ -96,6 +101,15 @@ GET/PUT/PATCH/DELETE /api/organizations/branches/{id}/
 ```
 
 Branch body: `{ "organization": 1, "name": "信義分院", "code": "XY", "address": "", "phone": "" }`
+
+**Self-service tenants (2026-09-23)**：
+- `POST organizations/` body: `{ "name": "小天使照護" }` — `code` 可省略
+  （後端自動產生 `ORG-XXXXXXXX`）。建立成功後該機構**自動綁定為這個帳號的
+  租戶**，refetch `/me` 即可拿到 `organization`。
+- 一個帳號限一間：已有機構再 POST → **409** `organization_already_exists`。
+  前端在使用者已有機構時應隱藏「新增機構」入口。
+- 可見性：list/detail 只回自己的機構（別人的機構 404）；superuser 看全部。
+- `DELETE` 限 superuser，一般 manager 刪自己的機構 → 403。
 
 ---
 
