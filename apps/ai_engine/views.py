@@ -615,3 +615,138 @@ class AIEngineViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class LLMScheduleViewSet(viewsets.ViewSet):
+    """純 LLM 排班（2026-09-23 產品決策）：免費模型直接產生班表。
+
+    前端「AI 排班請求」按鈕唯一要打的端點——排完直接寫入版本，
+    前端 refetch 班表即可看到格子。品質由驗證層守住：模型輸出的
+    每一筆都比對現實，不合格丟棄並回報，絕不寫入髒資料。
+    """
+    permission_classes = [IsManager]
+
+    @action(detail=False, methods=['post'], url_path='llm-generate')
+    def llm_generate(self, request):
+        from django.utils.dateparse import parse_date
+        from decimal import Decimal
+        from apps.schedules.models import Schedule, ScheduleVersion
+        from apps.billing.models import (
+            OrgBillingSettings, estimate_tokens, record_usage, would_exceed_cap,
+        )
+        from . import llm_provider, llm_scheduler
+
+        version_id = request.data.get('schedule_version')
+        if not version_id:
+            return Response({'error': 'schedule_version is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        versions = ScheduleVersion.objects.all()
+        if not request.user.is_superuser:
+            versions = versions.filter(organization=request.user.organization)
+        version = versions.filter(pk=version_id).first()
+        if version is None:
+            return Response({'error': 'schedule version not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if version.status != 'draft':
+            return Response(
+                {'code': 'schedule_version_locked',
+                 'error': 'Approved schedule versions are read-only.'},
+                status=status.HTTP_409_CONFLICT)
+
+        period_start = parse_date(request.data.get('period_start') or '') or version.period_start
+        period_end = parse_date(request.data.get('period_end') or '') or version.period_end
+        if period_end < period_start or (period_end - period_start).days > 62:
+            return Response({'error': 'invalid period (max 62 days)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # 計費：LLM 排班比照 generate 模式（產品決策：所有 AI 動作收費）
+        consume_token = bool(request.data.get('consume_token', True))
+        org = version.organization
+        if consume_token:
+            settings_row = OrgBillingSettings.objects.filter(organization=org).first()
+            if settings_row and not settings_row.is_billing_enabled:
+                return Response({'error': 'billing is disabled for this organization'},
+                                status=status.HTTP_402_PAYMENT_REQUIRED)
+            exceeds, current, projected, cap = would_exceed_cap(org, 'generate')
+            if exceeds:
+                return Response({
+                    'error': 'monthly billing cap exceeded',
+                    'tokens_required': estimate_tokens('generate'),
+                    'current_period_tokens': current, 'monthly_cap_tokens': cap,
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        context, lookups = llm_scheduler.build_context(version, period_start, period_end)
+        if not context['employees'] or not context['shifts']:
+            return Response({'error': '此機構沒有可排班的員工或班別'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        import json as _json
+        try:
+            output, model_name = llm_provider.generate_json(
+                llm_scheduler.SYSTEM_PROMPT,
+                _json.dumps(context, ensure_ascii=False),
+            )
+        except llm_provider.LLMNotConfigured as exc:
+            return Response({'code': 'llm_not_configured', 'error': str(exc)},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except llm_provider.LLMCallError as exc:
+            return Response({'code': 'llm_call_failed', 'error': str(exc)},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        raw_assignments = output.get('assignments') if isinstance(output, dict) else output
+        valid, rejected = llm_scheduler.validate_assignments(
+            raw_assignments or [], lookups, version)
+        warnings = llm_scheduler.coverage_warnings(valid, lookups)
+
+        created = []
+        for row in valid:
+            schedule = Schedule.objects.create(
+                schedule_version=version,
+                employee=row['employee'],
+                shift_template=row['shift'],
+                schedule_date=row['date'],
+                expected_hours=Decimal(str(row['shift'].duration_hours)),
+                status='assigned',
+                notes='AI 排班',
+            )
+            created.append({
+                'id': schedule.pk,
+                'employee_id': row['employee'].pk,
+                'date': row['date'],
+                'shift_id': row['shift'].pk,
+            })
+        # 版本期間只擴不縮（與手動排班一致）
+        if created:
+            dates = sorted(r['date'] for r in created)
+            ScheduleVersion.objects.filter(
+                pk=version.pk, period_start__gt=dates[0]).update(period_start=dates[0])
+            ScheduleVersion.objects.filter(
+                pk=version.pk, period_end__lt=dates[-1]).update(period_end=dates[-1])
+
+        billing_info = None
+        if consume_token:
+            usage = record_usage(
+                organization=org, billing_mode='generate',
+                solver_status='SUCCESS' if created else 'EMPTY',
+                user=request.user if request.user.is_authenticated else None,
+                schedule_version=version,
+                request_metadata={
+                    'engine': 'llm', 'model': model_name,
+                    'period_start': period_start.isoformat(),
+                    'period_end': period_end.isoformat(),
+                },
+            )
+            billing_info = {'billing_mode': 'generate',
+                            'tokens_charged': usage.tokens_charged}
+
+        return Response({
+            'created_count': len(created),
+            'rejected_count': len(rejected),
+            'assignments': created,
+            'rejected': rejected[:50],
+            'warnings': warnings[:50],
+            'model': model_name,
+            'engine': 'llm',
+            'billing': billing_info,
+        }, status=status.HTTP_201_CREATED)

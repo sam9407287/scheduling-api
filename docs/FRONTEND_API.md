@@ -557,6 +557,40 @@ schedule (still billed — pre-debit). Show the message.
 
 ---
 
+### 5.1 LLM 排班（AI 排班請求按鈕）  (`manager`, charges tokens)
+
+前端「AI 排班請求」按鈕唯一要打的端點——由免費 LLM 模型直接產生班表，
+後端驗證後**寫入版本**，前端 refetch schedules 即可看到格子：
+
+```jsonc
+POST /api/ai/schedule/llm-generate/
+{ "schedule_version": 42,
+  "period_start": "2026-10-01",   // optional，預設版本期間
+  "period_end": "2026-10-07",     // optional；區間上限 62 天
+  "consume_token": true }          // 計費比照 generate（10 tokens）
+
+// 201
+{ "created_count": 34, "rejected_count": 2,
+  "assignments": [{ "id": 90, "employee_id": 12, "date": "2026-10-01", "shift_id": 3 }],
+  "rejected": [{ "row": {...}, "reason": "缺少班別要求的證照" }],  // 模型的不合格輸出，最多 50 筆
+  "warnings": ["2026-10-03 早班 只排到 0/1 人"],                 // min_staff 缺口，最多 50 筆
+  "model": "gemini-2.0-flash", "engine": "llm",
+  "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
+
+// 409 schedule_version_locked — 已簽核版本，先取消簽核
+// 503 llm_not_configured — 後端未設模型 API key（找 Sam）
+// 502 llm_call_failed — 模型呼叫失敗，可重試
+// 402 — 月度 token 額度已滿
+```
+
+行為要點：
+- 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
+  不合格的丟棄並列在 `rejected`，絕不寫入髒資料。
+- 只**新增**班次（既有格子不動、重複跳過）；寫入的格子 `notes = "AI 排班"`。
+- `warnings` 回報 min_staff 沒排滿的缺口——顯示給管理者，不阻擋。
+- 呼叫可能需要 10–60 秒（模型推論），按鈕請做 loading 狀態。
+- 成功後 refetch `/schedules/schedules/?version=` 更新畫面即可。
+
 ## 6. Compliance config  (`manager`)
 
 ```
