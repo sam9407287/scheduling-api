@@ -574,7 +574,7 @@ POST /api/ai/schedule/llm-generate/
   "assignments": [{ "id": 90, "employee_id": 12, "date": "2026-10-01", "shift_id": 3 }],
   "rejected": [{ "row": {...}, "reason": "缺少班別要求的證照" }],  // 模型的不合格輸出，最多 50 筆
   "warnings": ["2026-10-03 早班 只排到 0/1 人"],                 // min_staff 缺口，最多 50 筆
-  "model": "gemini-2.0-flash", "engine": "llm",
+  "model": "gemini-3.6-flash", "engine": "llm",
   "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
 
 // 409 schedule_version_locked — 已簽核版本，先取消簽核

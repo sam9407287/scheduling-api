@@ -7,11 +7,12 @@ OpenAI-compatible endpoint (Groq/DeepSeek/Ollama) without code changes.
 
   LLM_PROVIDER   gemini (default) | openai_compat
   LLM_API_KEY    API key (for gemini also accepts GEMINI_API_KEY)
-  LLM_MODEL      default: gemini-2.0-flash
+  LLM_MODEL      default: gemini-3.6-flash
   LLM_BASE_URL   openai_compat only, e.g. https://api.groq.com/openai/v1
 """
 import json
 import os
+import time
 
 import requests
 
@@ -27,7 +28,7 @@ class LLMCallError(Exception):
 def _config():
     provider = os.getenv('LLM_PROVIDER', 'gemini')
     api_key = os.getenv('LLM_API_KEY') or os.getenv('GEMINI_API_KEY')
-    model = os.getenv('LLM_MODEL', 'gemini-2.0-flash')
+    model = os.getenv('LLM_MODEL', 'gemini-3.6-flash')
     base_url = os.getenv('LLM_BASE_URL', '')
     if not api_key:
         raise LLMNotConfigured(
@@ -76,15 +77,27 @@ def _call_gemini(api_key, model, system_prompt, user_prompt, timeout):
             'temperature': 0.2,
         },
     }
-    response = requests.post(
-        url, json=body, timeout=timeout,
-        headers={'x-goog-api-key': api_key},
-    )
+    # Free tier hits transient 503 (high demand) / 429 spikes — retry briefly
+    # before surfacing 502 to the button.
+    response = None
+    for attempt in range(3):
+        response = requests.post(
+            url, json=body, timeout=timeout,
+            headers={'x-goog-api-key': api_key},
+        )
+        if response.status_code not in (429, 503):
+            break
+        if attempt < 2:
+            time.sleep(3 * (attempt + 1))
     if response.status_code != 200:
         raise LLMCallError(f'gemini HTTP {response.status_code}: {response.text[:300]}')
     data = response.json()
     try:
-        return data['candidates'][0]['content']['parts'][0]['text']
+        parts = data['candidates'][0]['content']['parts']
+        texts = [p['text'] for p in parts if 'text' in p and not p.get('thought')]
+        if not texts:
+            raise KeyError('text')
+        return ''.join(texts)
     except (KeyError, IndexError) as exc:
         raise LLMCallError(f'unexpected gemini response shape: {str(data)[:300]}') from exc
 
