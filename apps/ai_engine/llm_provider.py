@@ -8,13 +8,33 @@ OpenAI-compatible endpoint (Groq/DeepSeek/Ollama) without code changes.
   LLM_PROVIDER   gemini (default) | openai_compat
   LLM_API_KEY    API key (for gemini also accepts GEMINI_API_KEY)
   LLM_MODEL      default: gemini-3.6-flash
+  LLM_FALLBACK_MODELS  gemini only: comma-separated models tried in order when
+                 the primary is overloaded (429/503) or retired (404).
+                 default: gemini-3.5-flash,gemini-2.5-flash
   LLM_BASE_URL   openai_compat only, e.g. https://api.groq.com/openai/v1
+
+Free-tier Gemini returns 503 "high demand" per *model*, not per key — while
+one model is saturated its siblings usually answer, so the Gemini path retries
+with exponential backoff and then walks the fallback list.
 """
 import json
+import logging
 import os
+import random
 import time
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MODEL = 'gemini-3.6-flash'
+DEFAULT_FALLBACK_MODELS = 'gemini-3.5-flash,gemini-2.5-flash'
+
+# Per-model retry policy for transient upstream errors.
+TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
+ATTEMPTS_PER_MODEL = 3
+BACKOFF_BASE_SECONDS = 2.0
+BACKOFF_MAX_SECONDS = 15.0
 
 
 class LLMNotConfigured(Exception):
@@ -28,7 +48,7 @@ class LLMCallError(Exception):
 def _config():
     provider = os.getenv('LLM_PROVIDER', 'gemini')
     api_key = os.getenv('LLM_API_KEY') or os.getenv('GEMINI_API_KEY')
-    model = os.getenv('LLM_MODEL', 'gemini-3.6-flash')
+    model = os.getenv('LLM_MODEL', DEFAULT_MODEL)
     base_url = os.getenv('LLM_BASE_URL', '')
     if not api_key:
         raise LLMNotConfigured(
@@ -45,7 +65,8 @@ def generate_json(system_prompt: str, user_prompt: str, timeout: int = 90):
     provider, api_key, model, base_url = _config()
 
     if provider == 'gemini':
-        raw = _call_gemini(api_key, model, system_prompt, user_prompt, timeout)
+        raw, model = _call_gemini_with_fallback(
+            api_key, _gemini_model_chain(model), system_prompt, user_prompt, timeout)
     else:
         raw = _call_openai_compat(api_key, model, base_url, system_prompt, user_prompt, timeout)
 
@@ -64,7 +85,68 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_gemini(api_key, model, system_prompt, user_prompt, timeout):
+def _gemini_model_chain(primary: str):
+    """Primary model first, then LLM_FALLBACK_MODELS in order (deduplicated)."""
+    raw = os.getenv('LLM_FALLBACK_MODELS', DEFAULT_FALLBACK_MODELS)
+    chain = [primary]
+    for name in raw.split(','):
+        name = name.strip()
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+def _backoff_seconds(attempt: int, response) -> float:
+    """Exponential backoff with jitter; honour Retry-After when Gemini sends one."""
+    retry_after = None
+    if response is not None:
+        try:
+            retry_after = float(response.headers.get('Retry-After', ''))
+        except (TypeError, ValueError):
+            retry_after = None
+    if retry_after:
+        return min(retry_after, BACKOFF_MAX_SECONDS)
+    base = BACKOFF_BASE_SECONDS * (2 ** attempt)
+    return min(base + random.uniform(0, 1), BACKOFF_MAX_SECONDS)
+
+
+def _call_gemini_with_fallback(api_key, models, system_prompt, user_prompt, timeout):
+    """Try each model in turn; return (raw_text, model_name_that_answered).
+
+    Per model: up to ATTEMPTS_PER_MODEL tries on transient statuses / network
+    errors with backoff. 404 (model retired) and 4xx client errors other than
+    429 skip straight to the next model — retrying them is pointless.
+    """
+    failures = []
+    for model in models:
+        response = None
+        last_error = None
+        for attempt in range(ATTEMPTS_PER_MODEL):
+            try:
+                response = _post_gemini(api_key, model, system_prompt, user_prompt, timeout)
+            except requests.RequestException as exc:
+                response = None
+                last_error = f'network error: {exc.__class__.__name__}'
+                logger.warning('gemini %s attempt %d: %s', model, attempt + 1, last_error)
+            else:
+                if response.status_code == 200:
+                    if attempt or failures:
+                        logger.info('gemini answered with %s after fallback/retry', model)
+                    return _extract_gemini_text(response.json()), model
+                last_error = f'HTTP {response.status_code}: {response.text[:200]}'
+                logger.warning('gemini %s attempt %d: %s', model, attempt + 1,
+                               last_error.splitlines()[0][:120])
+                if response.status_code not in TRANSIENT_STATUSES:
+                    break  # 404 / 400 / 403 — next model, no point retrying
+            if attempt < ATTEMPTS_PER_MODEL - 1:
+                time.sleep(_backoff_seconds(attempt, response))
+        failures.append(f'{model} -> {last_error}')
+    raise LLMCallError(
+        'gemini unavailable after trying ' + '; '.join(failures)
+    )
+
+
+def _post_gemini(api_key, model, system_prompt, user_prompt, timeout):
     url = (
         'https://generativelanguage.googleapis.com/v1beta/models/'
         f'{model}:generateContent'
@@ -77,28 +159,20 @@ def _call_gemini(api_key, model, system_prompt, user_prompt, timeout):
             'temperature': 0.2,
         },
     }
-    # Free tier hits transient 503 (high demand) / 429 spikes — retry briefly
-    # before surfacing 502 to the button.
-    response = None
-    for attempt in range(3):
-        response = requests.post(
-            url, json=body, timeout=timeout,
-            headers={'x-goog-api-key': api_key},
-        )
-        if response.status_code not in (429, 503):
-            break
-        if attempt < 2:
-            time.sleep(3 * (attempt + 1))
-    if response.status_code != 200:
-        raise LLMCallError(f'gemini HTTP {response.status_code}: {response.text[:300]}')
-    data = response.json()
+    return requests.post(
+        url, json=body, timeout=timeout,
+        headers={'x-goog-api-key': api_key},
+    )
+
+
+def _extract_gemini_text(data) -> str:
     try:
         parts = data['candidates'][0]['content']['parts']
         texts = [p['text'] for p in parts if 'text' in p and not p.get('thought')]
         if not texts:
             raise KeyError('text')
         return ''.join(texts)
-    except (KeyError, IndexError) as exc:
+    except (KeyError, IndexError, TypeError) as exc:
         raise LLMCallError(f'unexpected gemini response shape: {str(data)[:300]}') from exc
 
 

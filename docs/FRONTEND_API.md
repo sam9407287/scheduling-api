@@ -588,16 +588,17 @@ POST /api/ai/schedule/llm-generate/
   "assignments": [{ "id": 90, "employee_id": 12, "date": "2026-10-01", "shift_id": 3 }],
   "rejected": [{ "row": {...}, "reason": "缺少班別要求的證照" }],  // 模型的不合格輸出，最多 50 筆
   "warnings": ["2026-10-03 早班 只排到 0/1 人"],                 // min_staff 缺口，最多 50 筆
-  "model": "gemini-3.6-flash", "engine": "llm",
+  "model": "gemini-3.6-flash", "engine": "llm",   // 實際回答的模型；主模型過載時會是備援模型
   "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
 
 // 409 schedule_version_locked — 已簽核版本，先取消簽核
 // 503 llm_not_configured — 後端未設模型 API key（找 Sam）
-// 502 llm_call_failed — 模型呼叫失敗，可重試
+// 502 llm_call_failed — 主模型＋所有備援模型都失敗（後端已自動重試＋換模型），可稍後再按
 // 402 — 月度 token 額度已滿
 ```
 
 行為要點：
+- **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時最長約 2–3 分鐘，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
   不合格的丟棄並列在 `rejected`，絕不寫入髒資料。
 - 只**新增**班次（既有格子不動、重複跳過）；寫入的格子 `notes = "AI 排班"`。
