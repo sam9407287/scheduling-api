@@ -10,7 +10,8 @@ OpenAI-compatible endpoint (Groq/DeepSeek/Ollama) without code changes.
   LLM_MODEL      default: gemini-3.6-flash
   LLM_FALLBACK_MODELS  gemini only: comma-separated models tried in order when
                  the primary is overloaded (429/503) or retired (404).
-                 default: gemini-3.5-flash,gemini-2.5-flash
+                 default: gemini-3.5-flash,gemini-3.5-flash-lite
+  LLM_TOTAL_BUDGET_SECONDS  wall-clock cap across all retries/models (default 150)
   LLM_BASE_URL   openai_compat only, e.g. https://api.groq.com/openai/v1
 
 Free-tier Gemini returns 503 "high demand" per *model*, not per key — while
@@ -28,13 +29,18 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = 'gemini-3.6-flash'
-DEFAULT_FALLBACK_MODELS = 'gemini-3.5-flash,gemini-2.5-flash'
+DEFAULT_FALLBACK_MODELS = 'gemini-3.5-flash,gemini-3.5-flash-lite'
 
-# Per-model retry policy for transient upstream errors.
-TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
-ATTEMPTS_PER_MODEL = 3
+# Per-model retry policy for transient upstream errors. A free-tier 503 is not
+# an instant rejection — Google queues the call and gives up after 15-35 s —
+# so attempts are kept low and a wall-clock budget bounds the whole chain.
+# 429 is deliberately NOT retried on the same model: on the free tier it means
+# the per-model daily quota is gone, and the next model has its own quota.
+TRANSIENT_STATUSES = (500, 502, 503, 504)
+ATTEMPTS_PER_MODEL = 2
 BACKOFF_BASE_SECONDS = 2.0
 BACKOFF_MAX_SECONDS = 15.0
+DEFAULT_TOTAL_BUDGET_SECONDS = 150.0
 
 
 class LLMNotConfigured(Exception):
@@ -117,13 +123,22 @@ def _call_gemini_with_fallback(api_key, models, system_prompt, user_prompt, time
     errors with backoff. 404 (model retired) and 4xx client errors other than
     429 skip straight to the next model — retrying them is pointless.
     """
+    budget = float(os.getenv('LLM_TOTAL_BUDGET_SECONDS', DEFAULT_TOTAL_BUDGET_SECONDS))
+    deadline = time.monotonic() + budget
     failures = []
     for model in models:
         response = None
         last_error = None
         for attempt in range(ATTEMPTS_PER_MODEL):
+            remaining = deadline - time.monotonic()
+            if remaining <= 5:
+                failures.append(f'{model} -> skipped, {budget:.0f}s budget exhausted')
+                raise LLMCallError(
+                    'gemini unavailable after trying ' + '; '.join(failures)
+                )
             try:
-                response = _post_gemini(api_key, model, system_prompt, user_prompt, timeout)
+                response = _post_gemini(api_key, model, system_prompt, user_prompt,
+                                        min(timeout, remaining))
             except requests.RequestException as exc:
                 response = None
                 last_error = f'network error: {exc.__class__.__name__}'
@@ -137,9 +152,10 @@ def _call_gemini_with_fallback(api_key, models, system_prompt, user_prompt, time
                 logger.warning('gemini %s attempt %d: %s', model, attempt + 1,
                                last_error.splitlines()[0][:120])
                 if response.status_code not in TRANSIENT_STATUSES:
-                    break  # 404 / 400 / 403 — next model, no point retrying
+                    break  # 429 quota / 404 retired / 400 / 403 — next model now
             if attempt < ATTEMPTS_PER_MODEL - 1:
-                time.sleep(_backoff_seconds(attempt, response))
+                time.sleep(min(_backoff_seconds(attempt, response),
+                               max(deadline - time.monotonic(), 0)))
         failures.append(f'{model} -> {last_error}')
     raise LLMCallError(
         'gemini unavailable after trying ' + '; '.join(failures)

@@ -78,10 +78,11 @@ class TestRetryAndFallback:
 
     def test_503_retries_same_model_then_succeeds(self, transport):
         calls, queue = transport
-        queue.extend([_busy(), _busy(), _ok()])
+        n = llm_provider.ATTEMPTS_PER_MODEL
+        queue.extend([_busy()] * (n - 1) + [_ok()])
         _, model = llm_provider.generate_json('sys', 'user')
         assert model == 'primary'
-        assert calls == ['primary'] * 3
+        assert calls == ['primary'] * n
 
     def test_exhausted_primary_falls_back_and_reports_real_model(self, transport):
         calls, queue = transport
@@ -89,6 +90,29 @@ class TestRetryAndFallback:
         _, model = llm_provider.generate_json('sys', 'user')
         assert model == 'backup-a'
         assert calls == ['primary'] * llm_provider.ATTEMPTS_PER_MODEL + ['backup-a']
+
+    def test_429_quota_skips_to_next_model_without_retry(self, transport):
+        calls, queue = transport
+        queue.extend([FakeResponse(429, {'error': {'status': 'RESOURCE_EXHAUSTED'}}), _ok()])
+        _, model = llm_provider.generate_json('sys', 'user')
+        assert model == 'backup-a'
+        assert calls == ['primary', 'backup-a']
+
+    def test_total_budget_stops_chain(self, transport, monkeypatch):
+        calls, queue = transport
+        monkeypatch.setenv('LLM_TOTAL_BUDGET_SECONDS', '10')
+        clock = [0.0]
+        monkeypatch.setattr(llm_provider.time, 'monotonic', lambda: clock[0])
+
+        def slow_busy(*a, **kw):
+            clock[0] += 4.0  # each 503 takes 4 s of wall clock
+            calls.append('tick')
+            return _busy()
+        monkeypatch.setattr(llm_provider, '_post_gemini', slow_busy)
+        with pytest.raises(llm_provider.LLMCallError) as exc:
+            llm_provider.generate_json('sys', 'user')
+        assert 'budget exhausted' in str(exc.value)
+        assert calls.count('tick') <= 3  # never all 6 calls of the full chain
 
     def test_404_retired_model_skips_without_retry(self, transport):
         calls, queue = transport
