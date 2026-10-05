@@ -587,7 +587,13 @@ POST /api/ai/schedule/llm-generate/
 { "created_count": 34, "rejected_count": 2,
   "assignments": [{ "id": 90, "employee_id": 12, "date": "2026-10-01", "shift_id": 3 }],
   "rejected": [{ "row": {...}, "reason": "缺少班別要求的證照" }],  // 模型的不合格輸出，最多 50 筆
-  "warnings": ["2026-10-03 早班 只排到 0/1 人"],                 // min_staff 缺口，最多 50 筆
+  "warnings": [                                                 // 最多 50 筆，請原樣顯示
+    "此版本只排分店「中山分店」：小明 陳（EMP001）、…屬於其他分店，未納入 AI 排班（要全機構一起排請建立不限分店的版本）",
+    "小威 許（EMP009） 在此期間沒有被排到任何班次",
+    "2026-10-03 早班 只排到 0/1 人"],                             // 依序：分店範圍 → 範圍內未排到的人 → min_staff 缺口
+  "scope": { "branch_id": 4, "branch_name": "中山分店",           // 2026-10-05 新增：這次排班的員工範圍
+             "employees_in_scope": [4, 8],
+             "employees_out_of_scope": [1, 2, 3, 5, 6, 7, 9, 10] }, // 版本不限分店時 branch_id=null、此陣列為空
   "model": "gemini-3.6-flash", "engine": "llm",   // 實際回答的模型；主模型過載時會是備援模型
   "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
 
@@ -598,6 +604,8 @@ POST /api/ai/schedule/llm-generate/
 ```
 
 行為要點：
+- **分店範圍（2026-10-05）**：版本綁了分店時，後端只排該分店員工，`scope.employees_out_of_scope` 列出被排除的人、`warnings[0]` 用中文說明。前端在選到有 `branch` 的版本時，請把表格鎖定到該分店（或顯示橫幅），否則其他分店的人會看起來像「AI 漏排」。新增版本表單的分店欄位要讓使用者看得到並可選「不限分店」。
+- **七休一**：模型輸出若讓某人連續工作超過 6 天，第 7 天起的班次會進 `rejected`（reason 含「七休一」），版本內既有班次也算進連續天數。
 - **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時後端有 150 秒總預算上限，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
   不合格的丟棄並列在 `rejected`，絕不寫入髒資料。

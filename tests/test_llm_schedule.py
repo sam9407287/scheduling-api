@@ -168,3 +168,81 @@ class TestLLMGenerate:
         }, format='json')
         assert response.data['created_count'] == 0
         assert any('只排到 0/1' in w for w in response.data['warnings'])
+
+
+class TestScopeAndGuards:
+    """2026-10-05: 'AI 沒排到某些人' — branch scoping must be visible, not silent."""
+
+    def _second_employee(self, organization, branch_other):
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.create_user(
+            username='other_branch', password='x', first_name='小王',
+            organization=organization, branch=branch_other)
+        return Employee.objects.create(
+            user=user, employee_id='LLM2', organization=organization,
+            branch=branch_other, position='nurse', hire_date=date(2024, 1, 1))
+
+    def test_branch_version_reports_out_of_scope_employees(
+            self, admin_api_client, employee, shift, organization, branch, monkeypatch):
+        from apps.organizations.models import Branch
+        other = Branch.objects.create(organization=organization, name='B店', code='B')
+        outsider = self._second_employee(organization, other)
+        version = ScheduleVersion.objects.create(
+            organization=organization, branch=branch, version_label='分店版',
+            version_type='actual', period_start=date(2026, 10, 1),
+            period_end=date(2026, 10, 7), created_by=admin_api_client.handler._force_user)
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False}, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['scope']['branch_id'] == branch.pk
+        assert response.data['scope']['employees_out_of_scope'] == [outsider.pk]
+        assert response.data['scope']['employees_in_scope'] == [employee.pk]
+        first = response.data['warnings'][0]
+        assert '其他分店' in first and 'LLM2' in first and branch.name in first
+
+    def test_in_scope_employee_with_no_rows_is_flagged(
+            self, admin_api_client, employee, shift, version, organization, branch, monkeypatch):
+        idle = self._second_employee(organization, branch)
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False}, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        flagged = [w for w in response.data['warnings'] if '沒有被排到任何班次' in w]
+        assert len(flagged) == 1 and 'LLM2' in flagged[0]
+        assert response.data['scope']['employees_out_of_scope'] == []
+        assert idle.pk in response.data['scope']['employees_in_scope']
+
+    def test_seventh_consecutive_day_dropped(
+            self, admin_api_client, employee, shift, version, monkeypatch):
+        rows = [{'employee_id': employee.pk, 'date': f'2026-10-0{d}', 'shift_id': shift.pk}
+                for d in range(1, 8)]  # 10-01 .. 10-07, seven days straight
+        _mock_llm(monkeypatch, rows)
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False}, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['created_count'] == 6
+        assert response.data['rejected_count'] == 1
+        assert '七休一' in response.data['rejected'][0]['reason']
+        assert response.data['rejected'][0]['row']['date'] == '2026-10-07'
+        assert not Schedule.objects.filter(
+            schedule_version=version, schedule_date=date(2026, 10, 7)).exists()
+
+    def test_existing_rows_count_toward_consecutive_days(
+            self, admin_api_client, employee, shift, version, monkeypatch):
+        for d in range(1, 7):  # 6 days already in the version
+            Schedule.objects.create(
+                schedule_version=version, employee=employee, shift_template=shift,
+                schedule_date=date(2026, 10, d), expected_hours=Decimal('7'),
+                status='assigned')
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-07', 'shift_id': shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False}, format='json')
+        assert response.data['created_count'] == 0
+        assert '七休一' in response.data['rejected'][0]['reason']

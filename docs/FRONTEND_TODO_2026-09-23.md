@@ -48,3 +48,13 @@
 
 有 API 問題直接找 Sam；CORS 目前白名單是 localhost:3000 與
 intelligent-scheduling-system 的兩個網域，換網域要先講。
+
+
+## 追加 2026-10-05：AI 排班「有人沒排到」
+
+後端已回報原因，前端只需呈現：
+
+1. `POST /api/ai/schedule/llm-generate/` 回應新增 `scope`（見 FRONTEND_API.md §5.1）。
+2. 選到 `branch` 不為 null 的版本時，週排班表請鎖定該分店的員工（或在表格上方顯示「此版本僅排 {branch_name}」橫幅），並讓分店下拉自動切換。
+3. 新增版本對話框：分店欄位目前默默繼承頁面篩選，請顯示出來並提供「不限分店（全機構）」選項。
+4. `warnings` 第一條可能很長（列出被排除員工），請用可換行的區塊顯示，不要截斷。

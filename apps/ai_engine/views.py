@@ -700,7 +700,19 @@ class LLMScheduleViewSet(viewsets.ViewSet):
         raw_assignments = output.get('assignments') if isinstance(output, dict) else output
         valid, rejected = llm_scheduler.validate_assignments(
             raw_assignments or [], lookups, version)
-        warnings = llm_scheduler.coverage_warnings(valid, lookups)
+        lookups['existing_cells'] = {
+            (s.employee_id, s.schedule_date.isoformat(), s.shift_template_id)
+            for s in Schedule.objects.filter(schedule_version=version)
+        }
+        warnings = (llm_scheduler.scope_warnings(valid, lookups, version)
+                    + llm_scheduler.coverage_warnings(valid, lookups))
+        out_of_scope = lookups.get('out_of_scope_employees') or []
+        scope_info = {
+            'branch_id': version.branch_id,
+            'branch_name': version.branch.name if version.branch_id else None,
+            'employees_in_scope': sorted(lookups['employees']),
+            'employees_out_of_scope': [e.pk for e in out_of_scope],
+        }
 
         created = []
         for row in valid:
@@ -749,6 +761,7 @@ class LLMScheduleViewSet(viewsets.ViewSet):
             'assignments': created,
             'rejected': rejected[:50],
             'warnings': warnings[:50],
+            'scope': scope_info,
             'model': model_name,
             'engine': 'llm',
             'billing': billing_info,
