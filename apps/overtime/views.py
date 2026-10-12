@@ -80,12 +80,52 @@ class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = OvertimeRecordSerializer(overtime_records, many=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     
+    def _holiday_record(self, attendance: Attendance) -> OvertimeRecord:
+        """國定假日出勤的加給紀錄，依員工薪制分流（PM 2026-10-13 補充）。
+
+        - 時薪制：當日工資加倍（機構 holiday 規則倍率，預設 2.00）。
+        - 月薪制：假日工資已含在月薪內，不加倍；以補休為原則，無法補休時
+          才折發一日工資。先以 1.00 倍記錄並註明，由管理者決定後再調整。
+        """
+        from decimal import Decimal
+
+        employee = attendance.employee
+        rule = OvertimeRule.objects.filter(
+            organization=employee.organization,
+            overtime_type='holiday',
+            is_active=True,
+        ).first()
+        if employee.pay_type == 'hourly':
+            multiplier = rule.multiplier if rule else Decimal('2.00')
+            notes = '時薪制國定假日出勤：工資加倍'
+        else:
+            multiplier = Decimal('1.00')
+            notes = ('月薪制國定假日出勤：不加倍，以補休為原則；'
+                     '無法補休時再折發一日工資（請手動調整倍率）')
+        return OvertimeRecord.objects.create(
+            employee=employee,
+            attendance=attendance,
+            overtime_date=attendance.work_date,
+            overtime_type='holiday',
+            hours=attendance.actual_hours.quantize(Decimal('0.01')),
+            multiplier=multiplier,
+            notes=notes,
+        )
+
     def _calculate_overtime(self, attendance: Attendance) -> list:
         """計算加班時數"""
         from decimal import Decimal
 
         if not attendance.actual_hours:
             return []
+
+        # 國定假日出勤（勞基法 §39）另走薪制分流，整日工時都算假日出勤
+        from apps.compliance.models import Holiday
+        if Holiday.objects.filter(
+            organization=attendance.employee.organization,
+            date=attendance.work_date,
+        ).exists():
+            return [self._holiday_record(attendance)]
 
         # 取得對應的排班（filter().first() 不會拋 DoesNotExist，不需 try/except）
         from apps.schedules.models import Schedule

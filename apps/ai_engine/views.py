@@ -663,6 +663,12 @@ class LLMScheduleViewSet(viewsets.ViewSet):
             return Response({'error': 'invalid period (max 62 days)'},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        # PM 2026-10-13 優化#2：同一天是否可排不同崗位的班（預設一天一班）
+        allow_multi = request.data.get('allow_multiple_shifts_per_day', False)
+        if isinstance(allow_multi, str):
+            allow_multi = allow_multi.strip().lower() in ('1', 'true', 'yes')
+        allow_multi = bool(allow_multi)
+
         # 計費：LLM 排班比照 generate 模式（產品決策：所有 AI 動作收費）
         consume_token = bool(request.data.get('consume_token', True))
         org = version.organization
@@ -687,7 +693,7 @@ class LLMScheduleViewSet(viewsets.ViewSet):
         import json as _json
         try:
             output, model_name = llm_provider.generate_json(
-                llm_scheduler.SYSTEM_PROMPT,
+                llm_scheduler.build_system_prompt(allow_multi),
                 _json.dumps(context, ensure_ascii=False),
             )
         except llm_provider.LLMNotConfigured as exc:
@@ -699,7 +705,8 @@ class LLMScheduleViewSet(viewsets.ViewSet):
 
         raw_assignments = output.get('assignments') if isinstance(output, dict) else output
         valid, rejected = llm_scheduler.validate_assignments(
-            raw_assignments or [], lookups, version)
+            raw_assignments or [], lookups, version,
+            allow_multiple_shifts_per_day=allow_multi)
         lookups['existing_cells'] = {
             (s.employee_id, s.schedule_date.isoformat(), s.shift_template_id)
             for s in Schedule.objects.filter(schedule_version=version)
@@ -713,6 +720,7 @@ class LLMScheduleViewSet(viewsets.ViewSet):
             'employees_in_scope': sorted(lookups['employees']),
             'employees_out_of_scope': [e.pk for e in out_of_scope],
         }
+        options_info = {'allow_multiple_shifts_per_day': allow_multi}
 
         created = []
         for row in valid:
@@ -762,6 +770,7 @@ class LLMScheduleViewSet(viewsets.ViewSet):
             'rejected': rejected[:50],
             'warnings': warnings[:50],
             'scope': scope_info,
+            'options': options_info,
             'model': model_name,
             'engine': 'llm',
             'billing': billing_info,

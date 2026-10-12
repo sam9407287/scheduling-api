@@ -67,6 +67,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     contract_type_display = serializers.CharField(source='get_contract_type_display', read_only=True)
+    pay_type_display = serializers.CharField(source='get_pay_type_display', read_only=True)
     certifications = CertificationSerializer(many=True, read_only=True)
     certification_ids = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -82,6 +83,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'user_id', 'employee_id', 'organization', 'organization_name',
             'branch', 'branch_name', 'position', 'contract_type', 'contract_type_display',
+            'pay_type', 'pay_type_display',
             'agreed_hours_per_week', 'certifications', 'certification_ids',
             'hire_date', 'is_active', 'contracts', 'created_at', 'updated_at'
         ]
@@ -270,5 +272,5 @@ class EmployeeListSerializer(serializers.ModelSerializer):
             'id', 'employee_id', 'user', 'user_name', 'user_email',
             'organization', 'branch',
             'organization_name', 'branch_name', 'position',
-            'contract_type', 'is_active', 'certification_count', 'hire_date'
+            'contract_type', 'pay_type', 'is_active', 'certification_count', 'hire_date'
         ]

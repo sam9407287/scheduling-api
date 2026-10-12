@@ -97,6 +97,17 @@ class Employee(models.Model):
         default='full_time',
         verbose_name='契約類型'
     )
+    # PM 2026-10-13：月薪制國定假日出勤以補休為原則、無法補休才折發；時薪制才加倍。
+    PAY_TYPE_CHOICES = [
+        ('monthly', '月薪制'),
+        ('hourly', '時薪制'),
+    ]
+    pay_type = models.CharField(
+        max_length=10,
+        choices=PAY_TYPE_CHOICES,
+        default='monthly',
+        verbose_name='薪制'
+    )
     agreed_hours_per_week = models.DecimalField(
         max_digits=5,
         decimal_places=2,

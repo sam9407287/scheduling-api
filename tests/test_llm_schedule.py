@@ -246,3 +246,63 @@ class TestScopeAndGuards:
             'schedule_version': version.pk, 'consume_token': False}, format='json')
         assert response.data['created_count'] == 0
         assert '七休一' in response.data['rejected'][0]['reason']
+
+
+class TestSameDayOption:
+    """PM 2026-10-13 優化#2：AI 排班前可選擇同一天是否可排不同崗位的班。"""
+
+    @pytest.fixture
+    def evening_shift(self, organization):
+        return ShiftTemplate.objects.create(
+            organization=organization, name='晚班', start_time='16:00',
+            end_time='23:00', break_minutes=30, min_staff_count=1,
+        )
+
+    def test_default_keeps_one_shift_per_day(self, admin_api_client, employee, shift,
+                                             evening_shift, version, monkeypatch):
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': evening_shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False,
+        }, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['created_count'] == 1
+        assert response.data['rejected_count'] == 1
+        assert '一天一班' in response.data['rejected'][0]['reason']
+        assert response.data['options'] == {'allow_multiple_shifts_per_day': False}
+
+    def test_existing_row_blocks_second_shift_when_disallowed(
+            self, admin_api_client, employee, shift, evening_shift, version, monkeypatch):
+        Schedule.objects.create(
+            schedule_version=version, employee=employee, shift_template=shift,
+            schedule_date=date(2026, 10, 1), expected_hours=Decimal('7.00'),
+        )
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': evening_shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False,
+        }, format='json')
+        assert response.data['created_count'] == 0
+        assert '一天一班' in response.data['rejected'][0]['reason']
+
+    def test_allow_multiple_shifts_per_day(self, admin_api_client, employee, shift,
+                                           evening_shift, version, monkeypatch):
+        _mock_llm(monkeypatch, [
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
+            {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': evening_shift.pk},
+        ])
+        response = admin_api_client.post(URL, {
+            'schedule_version': version.pk, 'consume_token': False,
+            'allow_multiple_shifts_per_day': True,
+        }, format='json')
+        assert response.data['created_count'] == 2
+        assert response.data['options'] == {'allow_multiple_shifts_per_day': True}
+        assert Schedule.objects.filter(schedule_version=version).count() == 2
+
+    def test_prompt_rule_switches_with_option(self):
+        from apps.ai_engine.llm_scheduler import build_system_prompt
+        assert '只能排一個班別' in build_system_prompt(False)
+        assert '可以排多個不同崗位' in build_system_prompt(True)

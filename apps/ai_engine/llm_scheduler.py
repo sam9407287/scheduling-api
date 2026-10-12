@@ -12,7 +12,13 @@ from apps.leaves.solver_dates import approved_leave_dates
 from apps.schedules.models import Schedule
 from apps.shifts.models import ShiftTemplate
 
-SYSTEM_PROMPT = """你是排班助手。根據提供的員工、班別與規則，產生一份排班表。
+# PM 2026-10-13 優化#2：AI 排班前可選擇「同一天是否可排不同崗位的班」。
+SAME_DAY_RULES = {
+    True: '5. 同一員工同一天可以排多個不同崗位(班別)，但班別時間不可重疊；每人每日總工時不超過 12 小時。',
+    False: '5. 同一員工同一天只能排一個班別，絕不可同日排第二個班。',
+}
+
+SYSTEM_PROMPT_TEMPLATE = """你是排班助手。根據提供的員工、班別與規則，產生一份排班表。
 
 必須遵守：
 1. 只能使用提供的 employee_id 與 shift_id，日期必須在期間內。
@@ -20,7 +26,7 @@ SYSTEM_PROMPT = """你是排班助手。根據提供的員工、班別與規則�
 3. 員工缺少班別要求的證照(required_cert_ids)時，不可排入該班別。
 4. 不可排在員工的請假日(leave_dates)或每週不可排星期(blocked_weekdays, 0=週一)。
    也不可排在機構公休日(org.closed_weekdays, 0=週一)，公休日整天不排任何班。
-5. 同一員工同一天不可排時間重疊的班別；每人每日總工時不超過 12 小時。
+__SAME_DAY_RULE__
 6. 每人連續工作不得超過 6 天，每 7 天至少休 1 天。
 7. 每人每週總工時不得超過該員工的 weekly_hours；weekly_hours 較低的是兼職，
    班數要明顯少於全職。
@@ -31,6 +37,15 @@ SYSTEM_PROMPT = """你是排班助手。根據提供的員工、班別與規則�
 只輸出 JSON，格式：
 {"assignments": [{"employee_id": 1, "date": "YYYY-MM-DD", "shift_id": 2}, ...]}
 不要輸出任何其他文字。"""
+
+
+def build_system_prompt(allow_multiple_shifts_per_day=False):
+    """Prompt with rule 5 switched by the per-call same-day option."""
+    return SYSTEM_PROMPT_TEMPLATE.replace(
+        '__SAME_DAY_RULE__', SAME_DAY_RULES[bool(allow_multiple_shifts_per_day)])
+
+
+SYSTEM_PROMPT = build_system_prompt(False)
 
 
 def build_context(version, period_start, period_end):
@@ -130,15 +145,18 @@ def employee_display(emp):
 MAX_CONSECUTIVE_DAYS = 6
 
 
-def validate_assignments(raw, lookups, version):
+def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=False):
     """Filter the model output down to writable rows.
 
     Returns (valid_rows, rejected list of {row, reason}).
+    allow_multiple_shifts_per_day=False ⇒ 同一員工同一天只保留第一個班，
+    版本裡既有的班次也算（PM 2026-10-13 優化#2）。
     """
     existing = {
         (s.employee_id, s.schedule_date.isoformat(), s.shift_template_id)
         for s in Schedule.objects.filter(schedule_version=version)
     }
+    days_taken = {(emp_id, day) for emp_id, day, _ in existing}
     valid, rejected, seen = [], [], set()
     if not isinstance(raw, list):
         return [], [{'row': raw, 'reason': 'assignments 不是清單'}]
@@ -174,6 +192,10 @@ def validate_assignments(raw, lookups, version):
         if key in seen or key in existing:
             rejected.append({'row': row, 'reason': '重複班次（已存在或模型重複輸出）'})
             continue
+        if not allow_multiple_shifts_per_day and (emp_id, date_str) in days_taken:
+            rejected.append({'row': row, 'reason': '同一天已有班次（本次設定為一天一班）'})
+            continue
+        days_taken.add((emp_id, date_str))
         seen.add(key)
         valid.append({'employee': employee, 'shift': shift, 'date': date_str})
 

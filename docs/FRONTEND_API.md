@@ -128,6 +128,7 @@ Employee object (key fields):
   "user": { "id": 30, "username": "...", "full_name": "王小明" },
   "organization": 1, "branch": 3, "position": "nurse",
   "contract_type": "full_time", "agreed_hours_per_week": "40.00",
+  "pay_type": "monthly", "pay_type_display": "月薪制",   // 2026-10-13 新增：monthly | hourly，預設 monthly；影響國定假日加給（§8）
   "certifications": [ { "id": 5, "name": "ACLS", "code": "ACLS" } ],
   "hire_date": "2024-01-01", "is_active": true,
   // sensitive — only meaningful with active consent (see §2.2)
@@ -581,6 +582,7 @@ POST /api/ai/schedule/llm-generate/
 { "schedule_version": 42,
   "period_start": "2026-10-01",   // optional，預設版本期間
   "period_end": "2026-10-07",     // optional；區間上限 62 天
+  "allow_multiple_shifts_per_day": false,  // 2026-10-13 新增：同一人同一天可否排不同崗位的班；預設 false（一天一班）
   "consume_token": true }          // 計費比照 generate（10 tokens）
 
 // 201
@@ -594,6 +596,7 @@ POST /api/ai/schedule/llm-generate/
   "scope": { "branch_id": 4, "branch_name": "中山分店",           // 2026-10-05 新增：這次排班的員工範圍
              "employees_in_scope": [4, 8],
              "employees_out_of_scope": [1, 2, 3, 5, 6, 7, 9, 10] }, // 版本不限分店時 branch_id=null、此陣列為空
+  "options": { "allow_multiple_shifts_per_day": false },   // 2026-10-13 新增：本次生效的選項（回顯）
   "model": "gemini-3.6-flash", "engine": "llm",   // 實際回答的模型；主模型過載時會是備援模型
   "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
 
@@ -605,6 +608,9 @@ POST /api/ai/schedule/llm-generate/
 
 行為要點：
 - **分店範圍（2026-10-05）**：版本綁了分店時，後端只排該分店員工，`scope.employees_out_of_scope` 列出被排除的人、`warnings[0]` 用中文說明。前端在選到有 `branch` 的版本時，請把表格鎖定到該分店（或顯示橫幅），否則其他分店的人會看起來像「AI 漏排」。新增版本表單的分店欄位要讓使用者看得到並可選「不限分店」。
+- **同日多班（2026-10-13）**：`allow_multiple_shifts_per_day` 預設 `false`，同一員工同一天只保留第一個班，
+  第二個班進 `rejected`（reason「同一天已有班次（本次設定為一天一班）」），版本裡既有的班也算。
+  設 `true` 時模型可為同一人在同一天排不同崗位（時間不重疊、每日 ≤12h）。請在 AI 排班對話框放 checkbox。
 - **七休一**：模型輸出若讓某人連續工作超過 6 天，第 7 天起的班次會進 `rejected`（reason 含「七休一」），版本內既有班次也算進連續天數。
 - **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時後端有 150 秒總預算上限，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
@@ -689,6 +695,20 @@ GET/POST  /api/overtime/rules/
 ```
 Standard DRF CRUD; shapes follow the models (`/api/schema/` has the full
 field list).
+
+### 國定假日出勤加給依薪制分流（2026-10-13，PM 補充）
+
+`POST /api/overtime/records/calculate/ { "attendance_id": 7 }` 遇到出勤日是機構
+國定假日（§6 holiday 表）時，整日工時以 `overtime_type: "holiday"` 一筆記錄：
+
+| `employee.pay_type` | `multiplier` | `notes` |
+|---|---|---|
+| `hourly` 時薪制 | 機構 holiday 規則倍率，沒設則 `2.00` | 「時薪制國定假日出勤：工資加倍」 |
+| `monthly` 月薪制 | `1.00`（**不加倍**） | 「月薪制國定假日出勤：不加倍，以補休為原則；無法補休時再折發一日工資（請手動調整倍率）」 |
+
+月薪制的「補休 vs 折發」由管理者事後決定：折發就 `PATCH /api/overtime/records/{id}/`
+把 `multiplier` 改成 `2.00`。前端在加班紀錄列表請把 `notes` 顯示出來，
+員工表單加「薪制」下拉（§2 `pay_type`）。
 
 ---
 
