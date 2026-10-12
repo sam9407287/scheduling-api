@@ -252,6 +252,7 @@ Three docs sit alongside this file:
 
 | Doc | Audience | Read when |
 |---|---|---|
+| [docs/SYSTEM_MAP.md](./docs/SYSTEM_MAP.md) (中文, Mermaid) | Everyone | **Start here for the big picture** — one-page map of frontend / Android / backend / DB / AI, the Railway launch chain, tech stack with versions and LOC share |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Engineers, ops | You need the system topology, layered constraints, billing pipeline detail, or the deployment story |
 | [docs/BUSINESS_FLOWS.md](./docs/BUSINESS_FLOWS.md) (中文) | PM, sales, customer IT | You need the "why" — what does the customer actually do, what are the business rules, how does the consent / billing flow look from a user's perspective |
 | [docs/FEATURE_STATUS.md](./docs/FEATURE_STATUS.md) (中文) | New maintainers, PM, handoff | Feature maturity map: primary vs secondary vs **scaffolding-only (mock/hook for Phase 4)** vs not-built. Read this before demoing so you don't mistake a mock (PaymentMethod, console email) for a finished feature |

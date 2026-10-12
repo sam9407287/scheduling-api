@@ -1,5 +1,7 @@
 # AI 排班系統 - Backend API
 
+> 想一頁看懂整個案子（前後端、資料庫、AI、部署、技術棧）：[docs/SYSTEM_MAP.md](./docs/SYSTEM_MAP.md)
+
 Django REST API 後端服務，提供排班管理、出勤打卡、AI 自動排班等功能。
 
 ## 技術棧
