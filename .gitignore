@@ -66,3 +66,7 @@ dev_local.sqlite3
 
 # Generated PDF deliverables (rebuild via scripts/md_to_pdf.py)
 /*.pdf
+
+# smoke test recordings
+smoke/.artifacts/
+test-results/

@@ -689,6 +689,8 @@ contact, but treat the banner as the user-facing signal).
 
 ```
 GET/POST  /api/attendance/attendances/?employee=&work_date=
+          // POST body: { "employee_id": 12, "work_date": "2026-10-10", "actual_hours": "8.00", ... }
+          // employee_id 省略 = 本人打卡（帳號須有員工檔案，否則 400）；跨機構 400（2026-10-13）
 GET/POST  /api/attendance/anomalies/
 GET/POST  /api/overtime/records/
 GET/POST  /api/overtime/rules/

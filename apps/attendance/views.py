@@ -21,6 +21,22 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     search_fields = ['employee__employee_id', 'employee__user__username']
     ordering_fields = ['-work_date', '-created_at']
     
+    def perform_create(self, serializer):
+        """`employee_id` 省略時視為本人打卡；主管替人登記時必須是同機構員工。"""
+        from rest_framework.exceptions import ValidationError
+        user = self.request.user
+        employee = serializer.validated_data.get('employee')
+        if employee is None:
+            employee = getattr(user, 'employee_profile', None)
+            if employee is None:
+                raise ValidationError({'employee_id': '此帳號沒有員工檔案，請指定 employee_id。'})
+        if not user.is_superuser and employee.organization_id != user.organization_id:
+            raise ValidationError({'employee_id': '只能登記自己機構的員工。'})
+        work_date = serializer.validated_data.get('work_date')
+        if Attendance.objects.filter(employee=employee, work_date=work_date).exists():
+            raise ValidationError({'work_date': '該員工當日已有出勤紀錄。'})
+        serializer.save(employee=employee)
+
     def get_queryset(self):
         queryset = super().get_queryset()
         
