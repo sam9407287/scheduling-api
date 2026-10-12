@@ -115,3 +115,66 @@ class TestPayTypeApi:
         response = admin_api_client.patch(
             f'/api/employees/employees/{employee.pk}/', {'pay_type': 'daily'}, format='json')
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestOvertimeRecordAdjust:
+    """管理者可 PATCH 倍率與備註（月薪制決定折發時改 2.00）；其他方法與欄位不開放。"""
+
+    @pytest.fixture
+    def record(self, employee, holiday):
+        att = _attendance(employee, holiday.date, '8.00')
+        return OvertimeRecord.objects.create(
+            employee=employee, attendance=att, overtime_date=holiday.date,
+            overtime_type='holiday', hours=Decimal('8.00'), multiplier=Decimal('1.00'),
+            notes='月薪制國定假日出勤',
+        )
+
+    def test_manager_can_patch_multiplier_and_notes(self, manager_user, record):
+        client = APIClient()
+        client.force_authenticate(user=manager_user)
+        response = client.patch(f'/api/overtime/records/{record.pk}/', {
+            'multiplier': '2.00', 'notes': '無法補休，折發一日工資',
+        }, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['multiplier'] == '2.00'
+        record.refresh_from_db()
+        assert record.multiplier == Decimal('2.00')
+        assert '折發' in record.notes
+
+    def test_patch_ignores_system_fields(self, manager_user, record):
+        client = APIClient()
+        client.force_authenticate(user=manager_user)
+        response = client.patch(f'/api/overtime/records/{record.pk}/', {
+            'hours': '99.00', 'overtime_type': 'regular', 'multiplier': '2.00',
+        }, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        record.refresh_from_db()
+        assert record.hours == Decimal('8.00')
+        assert record.overtime_type == 'holiday'
+        assert record.multiplier == Decimal('2.00')
+
+    def test_employee_cannot_patch(self, employee_user, record):
+        client = APIClient()
+        client.force_authenticate(user=employee_user)
+        response = client.patch(f'/api/overtime/records/{record.pk}/',
+                                {'multiplier': '2.00'}, format='json')
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_put_and_delete_not_allowed(self, manager_user, record):
+        client = APIClient()
+        client.force_authenticate(user=manager_user)
+        assert client.put(f'/api/overtime/records/{record.pk}/',
+                          {'multiplier': '2.00'}, format='json').status_code == 405
+        assert client.delete(f'/api/overtime/records/{record.pk}/').status_code == 405
+
+    def test_other_org_manager_cannot_see_or_patch(self, manager_role, record):
+        from apps.accounts.models import User
+        from apps.organizations.models import Organization
+        other_org = Organization.objects.create(name='別家機構', code='OTHER')
+        outsider = User.objects.create_user(
+            username='other_mgr', password='x', role=manager_role, organization=other_org)
+        client = APIClient()
+        client.force_authenticate(user=outsider)
+        assert client.get('/api/overtime/records/').data['count'] == 0
+        assert client.patch(f'/api/overtime/records/{record.pk}/',
+                            {'multiplier': '2.00'}, format='json').status_code == 404

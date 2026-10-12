@@ -707,7 +707,8 @@ field list).
 | `monthly` 月薪制 | `1.00`（**不加倍**） | 「月薪制國定假日出勤：不加倍，以補休為原則；無法補休時再折發一日工資（請手動調整倍率）」 |
 
 月薪制的「補休 vs 折發」由管理者事後決定：折發就 `PATCH /api/overtime/records/{id}/`
-把 `multiplier` 改成 `2.00`。前端在加班紀錄列表請把 `notes` 顯示出來，
+把 `multiplier` 改成 `2.00`（`manager` 以上；**只接受 `multiplier` 與 `notes`** 兩個欄位，
+其他欄位忽略；無 PUT / DELETE，回 405；跨機構 404）。前端在加班紀錄列表請把 `notes` 顯示出來，
 員工表單加「薪制」下拉（§2 `pay_type`）。
 
 ---

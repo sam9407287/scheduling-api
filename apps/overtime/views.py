@@ -1,13 +1,15 @@
 """
 Overtime views
 """
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Sum
 from .models import OvertimeRecord, OvertimeRule
-from .serializers import OvertimeRecordSerializer, OvertimeRuleSerializer
+from .serializers import (
+    OvertimeRecordSerializer, OvertimeRecordAdjustSerializer, OvertimeRuleSerializer,
+)
 from apps.accounts.permissions import IsManager, IsSupervisor
 from apps.attendance.models import Attendance
 
@@ -21,16 +23,39 @@ class OvertimeRuleViewSet(viewsets.ModelViewSet):
     ordering_fields = ['organization', 'overtime_type']
 
 
-class OvertimeRecordViewSet(viewsets.ReadOnlyModelViewSet):
-    """加班紀錄（唯讀，由系統自動計算）"""
+class OvertimeRecordViewSet(mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet):
+    """加班紀錄：由系統自動計算；管理者可 PATCH 倍率與備註（無 PUT、無 POST 建立）。"""
     queryset = OvertimeRecord.objects.select_related('employee', 'attendance')
     serializer_class = OvertimeRecordSerializer
     permission_classes = [IsAuthenticated]
     search_fields = ['employee__employee_id']
     ordering_fields = ['-overtime_date', 'employee']
-    
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.action in ('update', 'partial_update'):
+            return [IsManager()]
+        return super().get_permissions()
+
+    def get_serializer_class(self):
+        if self.action in ('update', 'partial_update'):
+            return OvertimeRecordAdjustSerializer
+        return super().get_serializer_class()
+
+    def partial_update(self, request, *args, **kwargs):
+        record = self.get_object()
+        serializer = OvertimeRecordAdjustSerializer(record, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        record.refresh_from_db()
+        return Response(OvertimeRecordSerializer(record).data)
+
     def get_queryset(self):
         queryset = super().get_queryset()
+
+        # 資料隔離：非超級使用者只看得到自己機構的紀錄
+        if not self.request.user.is_superuser:
+            queryset = queryset.filter(employee__organization=self.request.user.organization)
 
         # 員工只能看自己的加班紀錄
         if not (self.request.user.is_superuser or

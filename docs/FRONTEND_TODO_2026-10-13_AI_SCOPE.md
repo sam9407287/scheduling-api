@@ -138,7 +138,7 @@ scope: {
 1. 員工新增／編輯表單加「薪制」下拉（月薪制／時薪制），`src/types/employee.ts` 加 `pay_type`、`pay_type_display`。
 2. 員工列表加一欄「薪制」（可選）。
 3. 加班紀錄頁：`overtime_type === 'holiday'` 的列顯示 `notes`（月薪制會寫「以補休為原則…請手動調整倍率」），
-   並允許編輯 `multiplier`（`PATCH /api/overtime/records/{id}/`），讓管理者決定折發時改成 2.00。
+   並允許編輯 `multiplier`（`PATCH /api/overtime/records/{id}/`，只收 `multiplier`、`notes`），讓管理者決定折發時改成 2.00。
 
 ## B4. 「假別」優化 — 待 PM 釐清，先不要動
 
