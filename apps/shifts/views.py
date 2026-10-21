@@ -6,10 +6,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
 from django.db.models import Q
-from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority, TeamConstraint
+from .models import (
+    ShiftTemplate, ShiftRule, ShiftEmployeePriority, TeamConstraint,
+    StaffingRequirement,
+)
 from .serializers import (
     ShiftTemplateSerializer, ShiftRuleSerializer, ShiftEmployeePrioritySerializer,
-    TeamConstraintSerializer,
+    TeamConstraintSerializer, StaffingRequirementSerializer,
 )
 from apps.accounts.permissions import IsManager, IsSupervisor
 
@@ -138,3 +141,43 @@ class ShiftRuleViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
         
         return queryset
+
+
+class StaffingRequirementViewSet(viewsets.ModelViewSet):
+    """
+    每日人力需求 CRUD（「每天需要幾個人」，PM 2026-10-13）。
+
+    Filtering: `organization`, `branch` ('null' = org-wide only),
+    `shift_template` ('null' = day-total rules only), `weekday`, `date`,
+    `is_active`.
+    """
+    queryset = StaffingRequirement.objects.select_related(
+        'organization', 'branch', 'shift_template',
+    ).all()
+    serializer_class = StaffingRequirementSerializer
+    permission_classes = [IsManager]
+    ordering_fields = ['date', 'weekday', 'shift_template', 'created_at']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if not self.request.user.is_superuser and self.request.user.organization:
+            qs = qs.filter(organization=self.request.user.organization)
+        params = self.request.query_params
+        if params.get('organization'):
+            qs = qs.filter(organization_id=params['organization'])
+        if params.get('branch') == 'null':
+            qs = qs.filter(branch__isnull=True)
+        elif params.get('branch'):
+            qs = qs.filter(branch_id=params['branch'])
+        if params.get('shift_template') == 'null':
+            qs = qs.filter(shift_template__isnull=True)
+        elif params.get('shift_template'):
+            qs = qs.filter(shift_template_id=params['shift_template'])
+        if params.get('weekday') is not None and params.get('weekday') != '':
+            qs = qs.filter(weekday=params['weekday'])
+        if params.get('date'):
+            qs = qs.filter(date=params['date'])
+        if params.get('is_active') is not None:
+            qs = qs.filter(is_active=params['is_active'].lower() == 'true')
+        return qs
+

@@ -185,3 +185,34 @@ class HolidayViewSet(viewsets.ModelViewSet):
         if year:
             queryset = queryset.filter(date__year=year)
         return queryset
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def calendar(self, request):
+        """
+        班表用假日日曆：內建台灣國定假日（2026、2027，含補假日）＋機構自訂假日。
+
+        GET /api/compliance/holidays/calendar/?start=YYYY-MM-DD&end=YYYY-MM-DD
+        預設 start=今年 1/1、end=明年 12/31。回傳依日期排序：
+        [{date, name, kind: holiday|makeup, source: national|org, id}]
+        """
+        from datetime import date as date_cls
+        from django.utils.dateparse import parse_date
+        from .tw_holidays import holiday_calendar
+
+        today = date_cls.today()
+        start = parse_date(request.query_params.get('start') or '') or date_cls(today.year, 1, 1)
+        end = parse_date(request.query_params.get('end') or '') or date_cls(today.year + 1, 12, 31)
+        if end < start or (end - start).days > 366 * 3:
+            return Response({'error': 'invalid range (max 3 years)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        org = request.user.organization
+        rows = holiday_calendar(org, start, end) if org else [
+            {**h, 'source': 'national', 'id': None}
+            for h in __import__('apps.compliance.tw_holidays', fromlist=['national_holidays'])
+            .national_holidays(start, end)
+        ]
+        return Response({
+            'start': start.isoformat(), 'end': end.isoformat(),
+            'count': len(rows),
+            'holidays': [{**h, 'date': h['date'].isoformat()} for h in rows],
+        })

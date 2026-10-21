@@ -248,3 +248,80 @@ class ShiftEmployeePriority(models.Model):
 
     def __str__(self):
         return f"{self.shift_template.name} - 第{self.priority_rank}順位 - {self.employee}"
+
+
+class StaffingRequirement(models.Model):
+    """
+    每日人力需求規則（PM 2026-10-13：「每天需要幾個人」）。
+
+    一條規則 = 「哪些日子 × 哪個班別（或全日） → 最少/最多幾個人」。
+    比 ShiftTemplate.min_staff_count 更細：可以依星期幾（週末人少）或
+    特定日期（活動日加人）設定不同人數。
+
+    套用範圍（specificity，越具體越優先）：
+      date（特定日期） > weekday（每週固定星期） > 兩者皆空（每天）
+    同一具體程度下，分店專屬規則優先於全機構規則。
+    沒有任何規則命中的 (日期, 班別) 仍沿用 ShiftTemplate.min_staff_count。
+
+    shift_template=None 代表「當日總人數」（不分班別、同一人多班只算一人），
+    與各班別規則可同時存在；solver 兩者都當硬約束。
+    """
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.CASCADE,
+        related_name='staffing_requirements',
+        verbose_name='所屬機構',
+    )
+    branch = models.ForeignKey(
+        'organizations.Branch',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='staffing_requirements',
+        verbose_name='適用分店（None = 全機構）',
+    )
+    shift_template = models.ForeignKey(
+        ShiftTemplate,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='staffing_requirements',
+        verbose_name='適用班別（None = 當日總人數）',
+    )
+    weekday = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MaxValueValidator(6)],
+        verbose_name='星期（0=週一…6=週日，None = 不限）',
+    )
+    date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='特定日期（優先於星期）',
+    )
+    min_staff = models.PositiveIntegerField(
+        default=1,
+        verbose_name='最少人數（0 = 當天可不排）',
+    )
+    max_staff = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='最多人數（None = 不限）',
+    )
+    note = models.CharField(max_length=200, blank=True, verbose_name='備註')
+    is_active = models.BooleanField(default=True, verbose_name='啟用')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '每日人力需求'
+        verbose_name_plural = '每日人力需求'
+        ordering = ['organization', 'date', 'weekday', 'shift_template']
+
+    def __str__(self):
+        when = (self.date.isoformat() if self.date
+                else f'週{"一二三四五六日"[self.weekday]}' if self.weekday is not None
+                else '每天')
+        target = self.shift_template.name if self.shift_template_id else '全日'
+        cap = f'–{self.max_staff}' if self.max_staff is not None else ''
+        return f'{when} {target} {self.min_staff}{cap} 人'

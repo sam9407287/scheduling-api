@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, Role
+from .models import User, Role, EmailVerificationCode
 
 
 @admin.register(Role)
@@ -25,3 +25,11 @@ class UserAdmin(BaseUserAdmin):
         ('Firebase', {'fields': ('firebase_uid',)}),
         ('Organization', {'fields': ('organization', 'branch', 'role')}),
     )
+
+
+@admin.register(EmailVerificationCode)
+class EmailVerificationCodeAdmin(admin.ModelAdmin):
+    list_display = ['email', 'purpose', 'attempts', 'ip_address', 'created_at', 'expires_at', 'consumed_at']
+    list_filter = ['purpose']
+    search_fields = ['email', 'ip_address']
+    readonly_fields = ['code_hash']

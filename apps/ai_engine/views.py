@@ -334,6 +334,13 @@ class AIEngineViewSet(viewsets.ViewSet):
             request_constraints['closed_weekdays'] = (
                 cfg.weekly_closed_days if cfg else []
             )
+        # 每日人力需求規則（「每天需要幾個人」）：依日期/星期覆蓋 min_staff、加上限
+        if 'staffing_requirements' not in request_constraints:
+            from apps.shifts.staffing import load_staffing_rules, staffing_plan
+            request_constraints['staffing_requirements'] = staffing_plan(
+                load_staffing_rules(org_id, branch_id),
+                period_start, period_end, [sh['id'] for sh in shifts],
+            )
 
         schedule_request = ScheduleRequest(
             organization_id=org_id,

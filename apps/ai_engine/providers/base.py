@@ -16,7 +16,11 @@ class ScheduleRequest:
     period_end: date
     employees: List[Dict[str, Any]]  # 可排班員工列表
     shift_templates: List[Dict[str, Any]]  # 可用班別列表
-    constraints: Dict[str, Any]  # 硬約束 + 軟約束
+    # 硬約束 + 軟約束。勞基法鍵：max_weekly_hours / max_consecutive_days /
+    # min_rest_hours / max_daily_hours / max_daily_total_hours /
+    # weekly_rest_days（一例一休，預設 2）；closed_weekdays（機構公休）；
+    # staffing_requirements（每日人力需求：[{date, shift_id|None, min_staff, max_staff}]）
+    constraints: Dict[str, Any]
     preferences: Dict[str, Any]  # 員工偏好
 
     # --- Drift / repair mode ---
@@ -48,7 +52,8 @@ class ScheduleRequest:
     # Rule types listed here become heavy objective penalties instead of
     # hard constraints, so the solver avoids but won't go INFEASIBLE over
     # them. Valid entries: max_weekly_hours, max_consecutive_days,
-    # min_rest_hours. None / empty = all labour-law rules are hard.
+    # min_rest_hours, max_daily_hours, weekly_rest_days.
+    # None / empty = all labour-law rules are hard.
     soft_labor_rules: Optional[List[str]] = None
 
 

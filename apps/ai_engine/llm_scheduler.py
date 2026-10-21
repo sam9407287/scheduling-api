@@ -22,12 +22,15 @@ SYSTEM_PROMPT_TEMPLATE = """你是排班助手。根據提供的員工、班別�
 
 必須遵守：
 1. 只能使用提供的 employee_id 與 shift_id，日期必須在期間內。
-2. 每個班別每天至少排滿 min_staff 人。
+2. 每個班別每天至少排滿 min_staff 人。若 staffing_requirements 有指定某日期的人數，
+   以該筆為準：min_staff 是最少、max_staff（非 null 時）是最多，不可超過；
+   shift_id 為 null 的那筆是「當日總人數」（不分班別、同一人只算一次）。
 3. 員工缺少班別要求的證照(required_cert_ids)時，不可排入該班別。
 4. 不可排在員工的請假日(leave_dates)或每週不可排星期(blocked_weekdays, 0=週一)。
    也不可排在機構公休日(org.closed_weekdays, 0=週一)，公休日整天不排任何班。
 __SAME_DAY_RULE__
-6. 每人連續工作不得超過 6 天，每 7 天至少休 1 天。
+6. 一例一休：每人每週（週一到週日）最多只能上 5 天班、至少休 2 天，
+   且連續工作不得超過 6 天。
 7. 每人每週總工時不得超過該員工的 weekly_hours；weekly_hours 較低的是兼職，
    班數要明顯少於全職。
 8. 期間內每位員工都要被排到班（除非整段期間都請假或不可排）；
@@ -93,10 +96,18 @@ def build_context(version, period_start, period_end):
         days.append(day)
         day += timedelta(days=1)
 
+    # 每日人力需求規則（「每天需要幾個人」）：展開成期間內每筆 (日期, 班別/全日)
+    from apps.shifts.staffing import load_staffing_rules, staffing_plan, plan_index
+    plan = staffing_plan(
+        load_staffing_rules(version.organization_id, version.branch_id),
+        period_start, period_end, [s.pk for s in shifts],
+    )
+
     payload = {
         'period': {'start': period_start.isoformat(), 'end': period_end.isoformat(),
                    'dates': [d.isoformat() for d in days]},
         'org': {'closed_weekdays': closed_weekdays},
+        'staffing_requirements': plan,
         'employees': [
             {
                 'employee_id': e.pk,
@@ -133,6 +144,7 @@ def build_context(version, period_start, period_end):
         'dates': {d.isoformat() for d in days},
         'closed_weekdays': set(closed_weekdays),
         'out_of_scope_employees': out_of_scope,
+        'staffing': plan_index(plan),
     }
     return payload, lookups
 
@@ -143,6 +155,8 @@ def employee_display(emp):
 
 
 MAX_CONSECUTIVE_DAYS = 6
+# 一例一休（§36）：每七日應有二日之休息 ⇒ 每 ISO 週最多上 5 天
+MAX_WORK_DAYS_PER_WEEK = 5
 
 
 def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=False):
@@ -201,6 +215,10 @@ def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=Fa
 
     valid, overrun = _drop_consecutive_overruns(valid, existing)
     rejected.extend(overrun)
+    valid, overrun = _drop_weekly_rest_overruns(valid, existing)
+    rejected.extend(overrun)
+    valid, overrun = _drop_over_max_staff(valid, existing, lookups.get('staffing') or {})
+    rejected.extend(overrun)
     return valid, rejected
 
 
@@ -239,6 +257,71 @@ def _drop_consecutive_overruns(valid, existing):
     return kept, dropped
 
 
+def _drop_weekly_rest_overruns(valid, existing):
+    """一例一休（§36）：同一 ISO 週（週一～週日）上班超過 5 天的新班次丟棄。
+
+    已在版本裡的班次算進當週天數；同一天多班只算一天。
+    """
+    worked = {}
+    for emp_id, date_str, _ in existing:
+        worked.setdefault(emp_id, set()).add(date_cls.fromisoformat(date_str))
+    kept, dropped = [], []
+    for row in sorted(valid, key=lambda r: (r['employee'].pk, r['date'])):
+        emp_id, day = row['employee'].pk, date_cls.fromisoformat(row['date'])
+        days = worked.setdefault(emp_id, set())
+        if day in days:
+            kept.append(row)
+            continue
+        week_start = day - timedelta(days=day.weekday())
+        in_week = sum(1 for d in days if 0 <= (d - week_start).days <= 6)
+        if in_week >= MAX_WORK_DAYS_PER_WEEK:
+            dropped.append({
+                'row': {'employee_id': emp_id, 'date': row['date'], 'shift_id': row['shift'].pk},
+                'reason': f'當週已上滿 {MAX_WORK_DAYS_PER_WEEK} 天（一例一休）',
+            })
+            continue
+        days.add(day)
+        kept.append(row)
+    return kept, dropped
+
+
+def _drop_over_max_staff(valid, existing, staffing):
+    """每日人力需求上限：某日某班（或全日）超過 max_staff 的多餘班次丟棄。
+
+    staffing: {(date_iso, shift_id|None): {min_staff, max_staff}}；
+    版本裡既有的班次先佔名額，模型輸出依 (日期, 員工) 順序取到額滿為止。
+    """
+    caps = {k: v['max_staff'] for k, v in staffing.items() if v.get('max_staff') is not None}
+    if not caps:
+        return valid, []
+    per_shift, per_day = {}, {}
+    for emp_id, date_str, shift_id in existing:
+        per_shift[(date_str, shift_id)] = per_shift.get((date_str, shift_id), 0) + 1
+        per_day.setdefault(date_str, set()).add(emp_id)
+    kept, dropped = [], []
+    for row in sorted(valid, key=lambda r: (r['date'], r['employee'].pk)):
+        date_str, shift_id, emp_id = row['date'], row['shift'].pk, row['employee'].pk
+        shift_cap = caps.get((date_str, shift_id))
+        day_cap = caps.get((date_str, None))
+        if shift_cap is not None and per_shift.get((date_str, shift_id), 0) >= shift_cap:
+            dropped.append({
+                'row': {'employee_id': emp_id, 'date': date_str, 'shift_id': shift_id},
+                'reason': f'{date_str} {row["shift"].name} 已達人數上限 {shift_cap} 人',
+            })
+            continue
+        if (day_cap is not None and emp_id not in per_day.get(date_str, set())
+                and len(per_day.get(date_str, set())) >= day_cap):
+            dropped.append({
+                'row': {'employee_id': emp_id, 'date': date_str, 'shift_id': shift_id},
+                'reason': f'{date_str} 已達當日總人數上限 {day_cap} 人',
+            })
+            continue
+        per_shift[(date_str, shift_id)] = per_shift.get((date_str, shift_id), 0) + 1
+        per_day.setdefault(date_str, set()).add(emp_id)
+        kept.append(row)
+    return kept, dropped
+
+
 def scope_warnings(valid_rows, lookups, version):
     """誰沒被排到、為什麼——放在 warnings 最前面，前端現有 UI 直接顯示。"""
     warnings = []
@@ -266,18 +349,32 @@ def scope_warnings(valid_rows, lookups, version):
 
 
 def coverage_warnings(valid_rows, lookups):
-    """min_staff 缺口回報（不阻擋——警告哲學）。"""
-    count = {}
-    for row in valid_rows:
-        count[(row['date'], row['shift'].pk)] = count.get((row['date'], row['shift'].pk), 0) + 1
+    """min_staff 缺口回報（不阻擋——警告哲學）。
+
+    需要人數以每日人力需求規則（lookups['staffing']）為準，沒規則的
+    (日期, 班別) 沿用 ShiftTemplate.min_staff_count；版本既有班次也算已排。
+    """
+    count, day_people = {}, {}
+    rows = [(r['date'], r['shift'].pk, r['employee'].pk) for r in valid_rows]
+    rows += [(d, sid, e) for e, d, sid in lookups.get('existing_cells', ())]
+    for date_str, shift_id, emp_id in set(rows):
+        count[(date_str, shift_id)] = count.get((date_str, shift_id), 0) + 1
+        day_people.setdefault(date_str, set()).add(emp_id)
+    staffing = lookups.get('staffing') or {}
     warnings = []
     closed = lookups.get('closed_weekdays', set())
     for date_str in sorted(lookups['dates']):
         if date_cls.fromisoformat(date_str).weekday() in closed:
             continue  # 公休日本來就不該有人，不算缺口
         for shift in lookups['shifts'].values():
+            req = staffing.get((date_str, shift.pk))
+            need = req['min_staff'] if req else shift.min_staff_count
             got = count.get((date_str, shift.pk), 0)
-            if got < shift.min_staff_count:
-                warnings.append(
-                    f'{date_str} {shift.name} 只排到 {got}/{shift.min_staff_count} 人')
+            if got < need:
+                warnings.append(f'{date_str} {shift.name} 只排到 {got}/{need} 人')
+        req = staffing.get((date_str, None))
+        if req:
+            got = len(day_people.get(date_str, ()))
+            if got < req['min_staff']:
+                warnings.append(f'{date_str} 當日總人數只排到 {got}/{req["min_staff"]} 人')
     return warnings

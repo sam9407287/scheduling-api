@@ -257,7 +257,9 @@ class TestDeriveLegalSoftRelaxation:
         resp = admin_api_client.post(
             f'/api/schedules/versions/{b.id}/derive-legal/',
             {'consume_token': False,
-             'soft_rule_types': ['max_consecutive_days'],
+             # 一例一休（weekly_rest_days）預設也是硬約束，單一員工上 7 天
+             # 同樣會 INFEASIBLE；本測試只驗證「標成 soft 就能產出」。
+             'soft_rule_types': ['max_consecutive_days', 'weekly_rest_days'],
              'constraints': {'max_consecutive_days': 3, 'max_weekly_hours': 999,
                              'min_rest_hours': 0}},
             format='json',

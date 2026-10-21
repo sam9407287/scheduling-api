@@ -181,10 +181,31 @@ CELERY_BEAT_SCHEDULE = {
 # Email. Phase 3 uses the console backend (alerts are logged, not actually
 # delivered). Phase 4 will switch EMAIL_BACKEND via env var to a real
 # provider — no code change needed beyond the env var + credentials.
-EMAIL_BACKEND = os.getenv(
-    'EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend'
+# 2026-10-22：自助註冊要真的寄驗證碼 → 設了 EMAIL_HOST_USER 就自動改走 SMTP
+# （Gmail：smtp.gmail.com:587 + 應用程式密碼；收件人不限 Gmail）。
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() in ('1', 'true', 'yes')
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'false').lower() in ('1', 'true', 'yes')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND') or (
+    'django.core.mail.backends.smtp.EmailBackend' if EMAIL_HOST_USER
+    else 'django.core.mail.backends.console.EmailBackend'
 )
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@scheduling-api.local')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'noreply@scheduling-api.local')
+
+# Email 驗證碼註冊（apps.accounts.registration）：節流/有效期可用 env 微調
+EMAIL_VERIFICATION = {
+    'CODE_TTL_SECONDS': int(os.getenv('EMAIL_CODE_TTL_SECONDS', '600')),
+    'RESEND_COOLDOWN_SECONDS': int(os.getenv('EMAIL_CODE_RESEND_COOLDOWN', '60')),
+    'MAX_SENDS_PER_EMAIL_PER_HOUR': int(os.getenv('EMAIL_CODE_MAX_PER_EMAIL_HOUR', '5')),
+    'MAX_SENDS_PER_IP_PER_HOUR': int(os.getenv('EMAIL_CODE_MAX_PER_IP_HOUR', '20')),
+    'MAX_ATTEMPTS': int(os.getenv('EMAIL_CODE_MAX_ATTEMPTS', '5')),
+}
+# 只有本地開發（console backend）才在回應裡回 debug_code；生產絕不可開
+EMAIL_VERIFICATION_EXPOSE_CODE = False
 
 # AI Provider
 AI_SCHEDULE_PROVIDER = os.getenv(

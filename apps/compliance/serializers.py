@@ -8,6 +8,7 @@ from .models import LaborLawRule, ComplianceCheck, OrgComplianceSettings
 # Rule keys the engine understands; the settings endpoint validates against this.
 VALID_RULE_TYPES = {
     'max_weekly_hours', 'max_consecutive_days', 'min_rest_hours', 'max_daily_hours',
+    'weekly_rest_days',  # 一例一休（§36）：solver 可降為重罰軟約束
 }
 
 

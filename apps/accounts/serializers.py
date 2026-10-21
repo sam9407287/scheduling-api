@@ -61,9 +61,35 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
 class LoginSerializer(serializers.Serializer):
-    """Login request (for local development/testing)"""
-    username = serializers.CharField(help_text='使用者帳號')
+    """Login request（帳號密碼登入；username 或 email 擇一）"""
+    username = serializers.CharField(help_text='使用者帳號（或直接填 email）', required=False)
+    email = serializers.EmailField(help_text='Email（自助註冊的帳號用這個登入）', required=False)
     password = serializers.CharField(help_text='密碼', write_only=True)
+
+    def validate(self, data):
+        if not data.get('username') and not data.get('email'):
+            raise serializers.ValidationError({'username': 'username 或 email 必填一個'})
+        return data
+
+
+class RegisterSendCodeSerializer(serializers.Serializer):
+    """POST /auth/register/send-code/"""
+    email = serializers.EmailField(help_text='要註冊的信箱（任何信箱都可以，不限 Gmail）')
+
+
+class RegisterSerializer(serializers.Serializer):
+    """POST /auth/register/"""
+    email = serializers.EmailField()
+    code = serializers.CharField(min_length=6, max_length=6, help_text='信中的 6 位數驗證碼')
+    password = serializers.CharField(write_only=True, min_length=8, max_length=128)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+
+
+class RegisterResponseSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    user = UserProfileSerializer()
 
 
 class LoginResponseSerializer(serializers.Serializer):

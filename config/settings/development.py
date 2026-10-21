@@ -1,6 +1,7 @@
 """
 Development settings
 """
+import os
 from .base import *
 
 DEBUG = True
@@ -21,8 +22,12 @@ INTERNAL_IPS = [
     'localhost',
 ]
 
-# Email backend (console for development)
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# Email backend: console unless EMAIL_HOST_USER is set (then base.py picks SMTP,
+# handy for testing real delivery locally). The register/send-code response
+# echoes the code (`debug_code`) so the frontend can be wired without a mailbox.
+if not os.getenv('EMAIL_HOST_USER'):
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_VERIFICATION_EXPOSE_CODE = True
 
 # Allow all hosts in development
 ALLOWED_HOSTS = ['*']

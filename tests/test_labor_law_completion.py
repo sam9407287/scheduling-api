@@ -154,9 +154,10 @@ class TestHolidayScheduling:
         from apps.organizations.models import Organization
         other = Organization.objects.create(
             name='他', code='OT-LAW', address='x', phone='1', email='a@b.c')
-        Holiday.objects.create(organization=other, date=date(2026, 6, 19), name='端午節')
+        # 6/22 不是內建國定假日；別家機構的自訂假日不該影響本機構
+        Holiday.objects.create(organization=other, date=date(2026, 6, 22), name='他家院慶')
         day = _shift(organization, 'D', time(9, 0), time(17, 0))
-        _cell(version, employee, day, date(2026, 6, 19), 7)
+        _cell(version, employee, day, date(2026, 6, 22), 7)
         assert _rules_of(check_schedule_violations(version), 'holiday_scheduling') == []
 
 

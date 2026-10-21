@@ -235,6 +235,14 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             labor_law_defaults['closed_weekdays'] = (
                 cfg.weekly_closed_days if cfg else []
             )
+        # 每日人力需求規則：派生合規版同樣要守住每天需要的人數
+        if 'staffing_requirements' not in labor_law_defaults:
+            from apps.shifts.staffing import load_staffing_rules, staffing_plan
+            labor_law_defaults['staffing_requirements'] = staffing_plan(
+                load_staffing_rules(b_version.organization_id, b_version.branch_id),
+                b_version.period_start, b_version.period_end,
+                [sh['id'] for sh in shifts],
+            )
 
         schedule_request = ScheduleRequest(
             organization_id=b_version.organization_id,
@@ -415,6 +423,10 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # 每日人力需求 coverage（「每天需要幾個人」）：每天每班需要/已排人數
+        from apps.compliance.engine import coverage_for_version
+        coverage = coverage_for_version(version)
+
         return Response({
             'schedule_version_id': version.id,
             'rules_applied': rules or DEFAULT_RULES,
@@ -422,6 +434,12 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             'violations': [v.to_dict() for v in violations],
             'summary_by_rule': summarize_by_rule(violations),
             'total_count': len(violations),
+            'coverage': coverage,
+            'coverage_summary': {
+                'under': sum(1 for c in coverage if c['status'] == 'under'),
+                'over': sum(1 for c in coverage if c['status'] == 'over'),
+                'ok': sum(1 for c in coverage if c['status'] == 'ok'),
+            },
         })
 
     @action(detail=True, methods=['post'])

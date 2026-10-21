@@ -620,7 +620,9 @@ def _check_weekly_rest_days(
     """§36：勞工每七日中應有二日之休息（一例一休）。
 
     只檢查「版本期間完整涵蓋」的 ISO 週（週一~週日），避免期間頭尾的
-    不完整週產生假警報。soft：休息日出勤法律允許（需加班費），僅提醒。
+    不完整週產生假警報。嚴重度（2026-10-22 一例一休進規則）：
+      * 休 1 天（上 6 天）→ soft：休息日出勤法律允許（需加班費），僅提醒
+      * 休 0 天（上 7 天）→ hard：例假日出勤，除天災事變外不得為之
     """
     if not schedules:
         return []
@@ -646,7 +648,7 @@ def _check_weekly_rest_days(
         trigger = cells[-1]
         out.append(Violation(
             rule='weekly_rest_days',
-            severity='soft',
+            severity='hard' if rest_days <= 0 else 'soft',
             employee_pk=employee.pk,
             employee_code=employee.employee_id,
             employee_name=_employee_name(employee),
@@ -659,9 +661,51 @@ def _check_weekly_rest_days(
                 'week_start': week_start.isoformat(),
                 'rest_days': rest_days,
                 'required_rest_days': required_rest_days,
+                'worked_days': len(worked_days),
+                'regular_day_off_worked': rest_days <= 0,  # 例假日出勤
             },
         ))
     return out
+
+
+def coverage_for_version(schedule_version: ScheduleVersion) -> List[Dict[str, Any]]:
+    """每日人力需求 coverage：每天每班（及全日）需要 vs 已排人數。
+
+    需要人數來源：StaffingRequirement 規則（依日期/星期/分店解析），
+    沒有規則的 (日期, 班別) 沿用 ShiftTemplate.min_staff_count。
+    公休日略過；請假/取消的格子不算已排。
+    """
+    from apps.shifts.models import ShiftTemplate
+    from apps.shifts.staffing import load_staffing_rules, staffing_plan, coverage_report
+    from .models import OrgComplianceSettings
+
+    shifts = [
+        {'id': st.id, 'name': st.name, 'min_staff_count': st.min_staff_count}
+        for st in ShiftTemplate.objects.filter(
+            organization=schedule_version.organization, is_active=True,
+        ).order_by('start_time', 'id')
+    ]
+    assignments = [
+        {'employee_id': row['employee_id'], 'date': row['schedule_date'].isoformat(),
+         'shift_id': row['shift_template_id']}
+        for row in Schedule.objects.filter(schedule_version=schedule_version)
+        .exclude(status__in=('cancelled', 'leave'))
+        .values('employee_id', 'schedule_date', 'shift_template_id')
+    ]
+    cfg = OrgComplianceSettings.objects.filter(
+        organization=schedule_version.organization,
+    ).first()
+    plan = staffing_plan(
+        load_staffing_rules(schedule_version.organization_id, schedule_version.branch_id),
+        schedule_version.period_start, schedule_version.period_end,
+        [sh['id'] for sh in shifts],
+    )
+    return coverage_report(
+        period_start=schedule_version.period_start,
+        period_end=schedule_version.period_end,
+        shifts=shifts, assignments=assignments, plan=plan,
+        closed_weekdays=(cfg.weekly_closed_days if cfg else []),
+    )
 
 
 def _check_break_minutes(
@@ -713,16 +757,15 @@ def _check_holidays(
     schedules: List[Schedule],
     schedule_version: ScheduleVersion,
 ) -> List[Violation]:
-    """§37/§39：國定假日出勤——不違法但工資應加倍，soft 提醒。"""
-    from .models import Holiday
-    holidays = {
-        h.date: h.name
-        for h in Holiday.objects.filter(
-            organization=schedule_version.organization,
-            date__gte=schedule_version.period_start,
-            date__lte=schedule_version.period_end,
-        )
-    }
+    """§37/§39：國定假日出勤——不違法但工資應加倍，soft 提醒。
+
+    假日來源 = 內建台灣國定假日表（tw_holidays.py，含補假日）＋ 機構自訂 Holiday。
+    """
+    from .tw_holidays import holiday_names
+    holidays = holiday_names(
+        schedule_version.organization,
+        schedule_version.period_start, schedule_version.period_end,
+    )
     if not holidays:
         return []
     out: List[Violation] = []

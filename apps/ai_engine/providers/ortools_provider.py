@@ -521,16 +521,35 @@ class ORToolsProvider(BaseScheduleProvider):
                 for shift in shifts:
                     model.Add(assignments[emp['id']][day_idx][shift['id']] == 0)
 
-        # 1. 每個班別每天至少需要 min_staff_count 人（公休日除外）
+        # 1. 每個班別每天至少需要 min_staff_count 人（公休日除外）。
+        #    每日人力需求規則（StaffingRequirement，「每天需要幾個人」）可依
+        #    日期/星期覆蓋最少人數並加上限；shift_id=None 的規則是當日總人數。
+        staffing = {
+            (req['date'], req.get('shift_id')): req
+            for req in (constraints.get('staffing_requirements') or [])
+        }
+        day_level_needed = any(sid is None for (_, sid) in staffing)
+        day_work = (self._day_work_vars(model, assignments, employees, shifts, num_days)
+                    if day_level_needed else None)
         for day_idx in range(num_days):
             if day_idx in closed_day_idx:
                 continue
+            day_iso = days[day_idx].isoformat()
             for shift in shifts:
                 shift_id = shift['id']
-                min_staff = shift.get('min_staff_count', 1)
-                model.Add(
-                    sum(assignments[emp['id']][day_idx][shift_id] for emp in employees) >= min_staff
-                )
+                req = staffing.get((day_iso, shift_id))
+                min_staff = (int(req['min_staff']) if req is not None
+                             else shift.get('min_staff_count', 1))
+                headcount = sum(assignments[emp['id']][day_idx][shift_id] for emp in employees)
+                model.Add(headcount >= min_staff)
+                if req is not None and req.get('max_staff') is not None:
+                    model.Add(headcount <= int(req['max_staff']))
+            req = staffing.get((day_iso, None))
+            if req is not None and day_work is not None:
+                total = sum(day_work[emp['id']][day_idx] for emp in employees)
+                model.Add(total >= int(req['min_staff']))
+                if req.get('max_staff') is not None:
+                    model.Add(total <= int(req['max_staff']))
 
         # 2. 同員工同日允許多個班別（multi-shift），但時間重疊的兩班互斥
         #    （AI 不主動產生重疊班；手動排班仍可重疊，鎖只在 solver）
@@ -911,6 +930,8 @@ class ORToolsProvider(BaseScheduleProvider):
           3. min_rest_hours        — for every ordered (day_i, shift_a) →
              (day_j, shift_b) pair whose rest gap < threshold (cross-midnight
              aware), the two cells cannot both go to the same employee.
+          2b. weekly_rest_days     — 一例一休（§36）：每 ISO 週工作天數
+             ≤ 7 − weekly_rest_days（預設 2 ⇒ 每週最多上 5 天）。
         """
         soft = set(soft_rule_types or ())
         penalty_terms: List = []
@@ -958,20 +979,12 @@ class ORToolsProvider(BaseScheduleProvider):
                 else:
                     model.Add(week_minutes <= max_weekly_minutes)
 
-        # --- 2. consecutive days ---
+        # --- 2. consecutive days（七休一：例假不得連續超過 6 日）---
+        day_work = self._day_work_vars(model, assignments, employees, shifts, num_days)
         if num_days >= max_consec + 1:
             for emp in employees:
                 emp_id = emp['id']
-                row = []
-                for day_idx in range(num_days):
-                    dw = model.NewBoolVar(f'dwork_e{emp_id}_d{day_idx}')
-                    # Reified link (not ==): multi-shift days have sum > 1.
-                    day_sum = sum(
-                        assignments[emp_id][day_idx][s['id']] for s in shifts
-                    )
-                    model.Add(day_sum >= 1).OnlyEnforceIf(dw)
-                    model.Add(day_sum == 0).OnlyEnforceIf(dw.Not())
-                    row.append(dw)
+                row = day_work[emp_id]
                 window = max_consec + 1
                 for start in range(num_days - window + 1):
                     window_sum = sum(row[start:start + window])
@@ -984,6 +997,29 @@ class ORToolsProvider(BaseScheduleProvider):
                         penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
                     else:
                         model.Add(window_sum <= max_consec)
+
+        # --- 2b. 一例一休（§36）：每七日應有二日之休息 ---
+        # 以 ISO 週（週一～週日）為單位，每週工作天數 ≤ 7 − weekly_rest_days
+        # （預設 2 → 最多 5 天）。期間頭尾的不完整週只約束期間內的日子，
+        # 對 ≤5 天的殘週自然不綁；完整週才真正生效。soft 時改為重罰項。
+        weekly_rest_days = int(constraints.get('weekly_rest_days', 2))
+        max_work_days = max(0, 7 - weekly_rest_days)
+        rest_days_soft = 'weekly_rest_days' in soft
+        if weekly_rest_days > 0:
+            for emp in employees:
+                emp_id = emp['id']
+                for wk, week_idxs in week_groups.items():
+                    if len(week_idxs) <= max_work_days:
+                        continue
+                    worked = sum(day_work[emp_id][di] for di in week_idxs)
+                    if rest_days_soft:
+                        over = model.NewIntVar(
+                            0, 7, f'soft_wrest_e{emp_id}_{wk.isoformat()}',
+                        )
+                        model.Add(worked - max_work_days <= over)
+                        penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
+                    else:
+                        model.Add(worked <= max_work_days)
 
         # --- 3. minimum rest hours ---
         # Same-day pairs are exempt: a split shift (e.g. 08-12 + 13-17) is a
@@ -1051,6 +1087,33 @@ class ORToolsProvider(BaseScheduleProvider):
                     model.Add(day_minutes <= max_daily_minutes)
 
         return penalty_terms
+
+    @staticmethod
+    def _day_work_vars(
+        model: cp_model.CpModel,
+        assignments: Dict,
+        employees: List[Dict],
+        shifts: List[Dict],
+        num_days: int,
+    ) -> Dict[int, List]:
+        """
+        day_work[emp_id][day_idx] — Bool「該員工當天有上班（任一班別）」。
+        Reified link (not ==) because multi-shift days have sum > 1.
+        Callers may build their own copy; duplicate literals are cheap for
+        CP-SAT and keep the constraint groups independent.
+        """
+        out: Dict[int, List] = {}
+        for emp in employees:
+            emp_id = emp['id']
+            row = []
+            for day_idx in range(num_days):
+                dw = model.NewBoolVar(f'dwork_e{emp_id}_d{day_idx}_{id(row)}')
+                day_sum = sum(assignments[emp_id][day_idx][s['id']] for s in shifts)
+                model.Add(day_sum >= 1).OnlyEnforceIf(dw)
+                model.Add(day_sum == 0).OnlyEnforceIf(dw.Not())
+                row.append(dw)
+            out[emp_id] = row
+        return out
 
     @staticmethod
     def _shift_start_datetime(day: date, shift: Dict[str, Any]) -> datetime:

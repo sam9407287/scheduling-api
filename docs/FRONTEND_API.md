@@ -19,11 +19,12 @@ Authorization: Bearer <firebase-id-token>      # production
 Authorization: Token <drf-token>               # dev/test (from /auth/login/)
 ```
 
-### `POST /api/auth/login/`  (dev/test only, no auth required)
+### `POST /api/auth/login/`  (no auth required; dev/test AND self-registered accounts)
 
 ```jsonc
-// request
+// request — username 或 email 擇一（自助註冊的帳號 username 就是 email）
 { "username": "manager01", "password": "secret" }
+{ "email": "someone@outlook.com", "password": "secret" }
 
 // 200
 {
@@ -32,6 +33,41 @@ Authorization: Token <drf-token>               # dev/test (from /auth/login/)
 }
 // 401 → { "error": "帳號或密碼錯誤" }
 ```
+
+### Email 驗證碼自助註冊（2026-10-22）
+
+任何信箱都可以（不限 Gmail）；一個 email 只能有一個帳號；新帳號 = `manager`、
+`organization: null`（跟 Google 登入一樣，進系統後走「建立機構」onboarding）。
+兩步：
+
+```jsonc
+// 1) 寄驗證碼（未登入可打）
+POST /api/auth/register/send-code/
+{ "email": "someone@outlook.com" }
+// 200 { "message": "驗證碼已寄出，請到信箱查看", "email": "someone@outlook.com",
+//       "expires_in_seconds": 600, "cooldown_seconds": 60,
+//       "debug_code": "352948" }      // 只有本地開發（console email）才有這個欄位，方便串接
+// 409 { "code": "email_already_registered" }   → 導去登入（或 Google 登入）
+// 429 { "code": "too_many_requests", "reason": "resend_cooldown|email_hourly_limit|ip_hourly_limit",
+//       "retry_after_seconds": 42 }            → 「重新寄送」按鈕倒數 retry_after_seconds
+// 503 { "code": "email_send_failed" }           → 寄信服務異常，請稍後再試
+// 400 → email 格式錯誤
+
+// 2) 驗證碼 + 密碼 → 建帳號並回 Token（之後跟 /auth/login/ 一樣帶 Authorization: Token <key>）
+POST /api/auth/register/
+{ "email": "someone@outlook.com", "code": "352948", "password": "Str0ng-Pass-2026",
+  "first_name": "小明", "last_name": "王", "phone": "0912345678" }   // 後三個 optional
+// 201 { "token": "9a8b7c…", "user": { …同 /auth/users/me/ 的欄位, "organization": null } }
+// 400 { "code": "invalid_code" }    驗證碼錯（最多錯 5 次）
+// 400 { "code": "code_expired" }    10 分鐘過期或還沒索取 → 請重新寄送
+// 400 { "code": "code_locked" }     錯太多次 → 請重新寄送
+// 400 { "code": "weak_password", "details": ["密碼長度至少 8…", …] }  密碼不符 Django 規則（≥8 碼、不可全數字、不可太常見、不可跟 email 太像）
+// 409 { "code": "email_already_registered" }
+```
+
+防洗帳號節流（後端固定）：同一 email 60 秒內不得重寄、每小時最多 5 封；同一 IP 每小時 20 封；
+驗證碼只存 hash、單次使用、新碼寄出舊碼即作廢。
+之後用同一個 email 走 Google 登入會**綁到同一個帳號**（不會變成兩個帳號）。
 
 ### Google login (Firebase)
 
@@ -222,6 +258,8 @@ GET/PUT   /api/shifts/templates/{id}/employee_priorities/   // GET list, PUT bul
 GET/POST  /api/shifts/rules/
 GET/POST  /api/shifts/team-constraints/        // manager
 GET/PUT/PATCH/DELETE /api/shifts/team-constraints/{id}/
+GET/POST  /api/shifts/staffing-requirements/   // manager（2026-10-22 每日人力需求）
+GET/PUT/PATCH/DELETE /api/shifts/staffing-requirements/{id}/
 ```
 
 Shift template body:
@@ -254,6 +292,40 @@ POST /api/shifts/rules/
 ```
 An active `max_daily_hours` rule feeds the AI solver's daily-hours cap
 (precedence: solver default 8h < org rule < request `constraints`).
+
+### 3.2 每日人力需求（「每天需要幾個人」，2026-10-22，PM 10/13 回饋）
+
+`ShiftTemplate.min_staff_count` 是「每天都一樣」的最低人數；這張表讓人數
+**依星期幾或特定日期不同**，並可設上限。沒有規則命中的 (日期, 班別) 仍用
+`min_staff_count`。
+
+```jsonc
+POST /api/shifts/staffing-requirements/
+{ "organization": 1,            // 非 superuser 可省略（後端強制為登入者機構）
+  "branch": null,               // null = 全機構；填分店 id = 只對該分店的版本生效
+  "shift_template": 4,          // null = 「當日總人數」（不分班別、同一人多班只算一人）
+  "weekday": 6,                 // 0=週一…6=週日；與 date 擇一；都不填 = 每天
+  "date": null,                 // "2026-12-24" 特定日期（優先於 weekday）
+  "min_staff": 2,               // 0 = 當天可不排
+  "max_staff": 3,               // null = 不限；有填必須 ≥ min_staff（硬上限）
+  "note": "週日人少", "is_active": true }
+// 201 回傳同欄位 + "weekday_label": "週日", "shift_template_name": "早班", "branch_name"
+// 400 { "date": [...] } date 與 weekday 同時填；{ "max_staff": [...] } 上限小於下限；
+//     { "shift_template": [...] } 班別不屬於本機構
+GET /api/shifts/staffing-requirements/?shift_template=4|null&weekday=6&date=2026-12-24&branch=null&is_active=true
+```
+
+優先序（越具體越優先）：`date` > `weekday` > 每天；同一具體程度分店專屬 > 全機構。
+
+生效位置（全部後端處理，前端只要提供設定 UI 與顯示結果）：
+- **AI 排班（§5.1 LLM）**：規則進 prompt；超過 `max_staff` 的多餘班次進 `rejected`
+  （reason 含「人數上限」）；`warnings` 的缺口以規則人數計（含「當日總人數只排到 x/y 人」）。
+- **OR-Tools（§5 generate / §4.2 derive-legal）**：min/max 都是硬約束；人不夠會 INFEASIBLE，
+  請把 message 顯示出來。
+- **一鍵合規檢查（§4.1）**：回應多了 `coverage`（每天每班需要 vs 已排），見 §4.1。
+
+UI 建議：設定頁一張表「星期/日期 × 班別 → 最少–最多人」；班表每一天的欄頭顯示
+「已排/需要」（來自 §4.1 `coverage`），`under` 標紅、`over` 標橘。
 
 **Multi-shift days**: the AI solver no longer limits one shift per employee
 per day. Same-day shifts are allowed when their times do not overlap; the
@@ -357,7 +429,7 @@ POST /api/schedules/versions/{id}/check-compliance/
              // 2026-09-18 勞基法補全 (defaults shown):
              "max_daily_total_hours": 12,        // §32 normal+OT hard cap
              "max_monthly_overtime_hours": 46,   // §32 monthly OT (hard)
-             "weekly_rest_days": 2,              // §36 一例一休 (soft by default)
+             "weekly_rest_days": 2,              // §36 一例一休：休 0 天=hard、休 1 天=soft（2026-10-22）
              "min_break_minutes": 30 },          // §35 >4h shift break (soft)
   "soft_rule_types": ["max_weekly_hours"] }   // optional override
 
@@ -378,22 +450,50 @@ POST /api/schedules/versions/{id}/check-compliance/
       "related_dates": ["2026-06-05"],          // other cells in the offending window
       "detail": { "rest_hours": 2.0, "required_hours": 11 }
     }
-  ]
+  ],
+  // 2026-10-22：每日人力 coverage（需要 vs 已排）。每天每個啟用班別一筆；
+  // shift_template_id=null 的是「當日總人數」規則（只有設了該規則的日子才有）。
+  // 公休日略過。required_* 來自 §3.2 規則（source="rule"）或模板 min_staff_count（source="template"）。
+  "coverage": [
+    { "date": "2026-06-01", "shift_template_id": 7, "shift_name": "早班",
+      "required_min": 2, "required_max": null, "assigned": 1,
+      "status": "under",            // ok | under | over
+      "source": "template" }
+  ],
+  "coverage_summary": { "under": 3, "over": 0, "ok": 57 }
 }
 ```
 Render each violation on the cell keyed by `(employee_pk, schedule_date, shift_template_id)`.
+Render `coverage` on the day/shift header（例：「1/2」紅字），not on employee cells.
+
+**一例一休（§36，2026-10-22 進規則）** — `weekly_rest_days`：每 ISO 週（週一～週日）
+應休 2 天。`detail.rest_days` 0 ⇒ `severity: "hard"`（例假日出勤，紅）、1 ⇒ `"soft"`
+（休息日出勤，需加班費，黃）；`detail.regular_day_off_worked` 直接告訴你是哪一種。
+只判「版本期間完整涵蓋」的週。AI 排班／派生合規版會自動守住每週 ≤ 5 天（見 §5、§5.1）。
 
 New rule codes (labels come back in `rule_label`, already 中文):
 `max_daily_total_hours` / `max_monthly_overtime_hours` are HARD by default;
-`weekly_rest_days` / `min_break_minutes` / `holiday_scheduling` come back
-with `severity: "soft"` by default (legal with overtime pay / consent) —
-render amber, never block. `holiday_scheduling` fires from the org holiday
-table:
+`min_break_minutes` / `holiday_scheduling` come back with `severity: "soft"`
+by default (legal with overtime pay / consent) — render amber, never block
+(`weekly_rest_days` is mixed, see above). `holiday_scheduling` fires from the
+**built-in Taiwan national holiday table + the org's custom holidays**:
 
 ```
-GET/POST /api/compliance/holidays/?year=2026     (manager)
+GET /api/compliance/holidays/calendar/?start=2026-01-01&end=2027-12-31   (any logged-in user)
+// 2026-10-22：班表「一開始就顯示節日」用這支。預設 start=今年 1/1、end=明年 12/31（最長 3 年）。
+// 後端內建 2026、2027 全年台灣國定假日（含補假日），不用機構自己建。
+// 200
+{ "start": "2026-01-01", "end": "2027-12-31", "count": 46,
+  "holidays": [
+    { "date": "2026-02-17", "name": "春節（初一）", "kind": "holiday", "source": "national", "id": null },
+    { "date": "2026-10-09", "name": "國慶日補假",   "kind": "makeup",  "source": "national", "id": null },
+    { "date": "2026-11-11", "name": "院慶",         "kind": "holiday", "source": "org",      "id": 3 } ] }
+// kind: holiday=節日本日 / makeup=補假日；source: national=內建 / org=機構自訂（同一天機構自訂名稱優先）
+// 機構自訂假日仍用下面的 CRUD 增刪（國定假日不可刪，要例外就加一筆同日期的自訂名稱）
+
+GET/POST /api/compliance/holidays/?year=2026     (manager) — 機構自訂假日
 GET/PATCH/DELETE /api/compliance/holidays/{id}/
-POST body { "organization": 1, "date": "2026-10-10", "name": "國慶日" }
+POST body { "organization": 1, "date": "2026-11-11", "name": "院慶" }
 // (organization, date) unique → 400 on duplicates
 ```
 
@@ -533,7 +633,7 @@ POST /api/ai/schedule/generate/
   "employee_ids": [12, 17],        // optional, default = all active
   "shift_template_ids": [4, 5],    // optional, default = all active
   "constraints": {}, "preferences": {},
-  "enforce_labor_law": false,      // true = labour law as hard constraints
+  "enforce_labor_law": false,      // true = labour law as hard constraints（週工時、連續天數、間隔、日工時、一例一休 每週≤5天）
   "soft_rule_types": [],           // optional per-call soft labour rules
   "consume_token": true,
   "run_async": false,
@@ -612,6 +712,8 @@ POST /api/ai/schedule/llm-generate/
   第二個班進 `rejected`（reason「同一天已有班次（本次設定為一天一班）」），版本裡既有的班也算。
   設 `true` 時模型可為同一人在同一天排不同崗位（時間不重疊、每日 ≤12h）。請在 AI 排班對話框放 checkbox。
 - **七休一**：模型輸出若讓某人連續工作超過 6 天，第 7 天起的班次會進 `rejected`（reason 含「七休一」），版本內既有班次也算進連續天數。
+- **一例一休（2026-10-22）**：prompt 要求每人每週（週一～週日）最多上 5 天；模型還是多排時，同一週第 6 天起的班次進 `rejected`（reason 含「一例一休」），版本內既有班次也算。
+- **每日人力需求（2026-10-22，§3.2）**：規則人數進 prompt；超過 `max_staff` 的列進 `rejected`（reason 含「人數上限」）；缺口 `warnings` 以規則人數為準。
 - **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時後端有 150 秒總預算上限，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
   不合格的丟棄並列在 `rejected`，絕不寫入髒資料。
@@ -632,7 +734,8 @@ GET/PATCH /api/compliance/settings/       // soft vs hard rule config
 GET  /api/compliance/settings/  → { "soft_rule_types": ["max_weekly_hours"],
                                     "weekly_closed_days": [6] }
 PATCH same { "soft_rule_types": ["max_weekly_hours", "min_rest_hours"] }
-// valid keys: max_weekly_hours, max_consecutive_days, min_rest_hours, max_daily_hours
+// valid keys: max_weekly_hours, max_consecutive_days, min_rest_hours, max_daily_hours,
+//             weekly_rest_days（一例一休，2026-10-22；標 soft 後 AI/派生 A 人手不足時可放寬）
 // 400 on unknown keys
 ```
 

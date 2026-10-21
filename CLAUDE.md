@@ -108,7 +108,15 @@ All business logic lives under `apps/`:
 
 ### Authentication
 
-Every request must carry `Authorization: Bearer <firebase-id-token>`. `FirebaseAuthentication` (`apps/accounts/authentication.py`) verifies the JWT, then `get_or_create`s a local `User` whose `username` is set to `firebase_uid`. Tests bypass this entirely — they use DRF `TokenAuthentication` and create users directly.
+Every request must carry `Authorization: Bearer <firebase-id-token>` (Google
+login) or `Authorization: Token <drf-token>` (email/password accounts —
+production keeps `TokenAuthentication` after Firebase). Self-registration
+(2026-10-22): `POST /api/auth/register/send-code/` emails a 6-digit code
+(any mailbox; SMTP configured by `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD`
+env — Gmail app password expected; without them the console backend logs
+the mail and `send-code` works but nothing is delivered), then
+`POST /api/auth/register/` creates a manager with no organization.
+Rate limits live in `apps/accounts/registration.py`. `FirebaseAuthentication` (`apps/accounts/authentication.py`) verifies the JWT, then `get_or_create`s a local `User` whose `username` is set to `firebase_uid`. Tests bypass this entirely — they use DRF `TokenAuthentication` and create users directly.
 
 ### Permission Hierarchy
 
@@ -239,8 +247,9 @@ Quick reference for "which commit introduced X":
 | `4b9848d` | docs: ARCHITECTURE.md + BUSINESS_FLOWS.md + refreshed CLAUDE.md |
 | `7e73b42` | PR11 (Phase 3): soft vs hard labour-law rule severity + OrgComplianceSettings |
 | `f1933ce` | PR12 (Phase 3): monthly usage threshold alerts (Celery beat, console email) |
+| 2026-10-22 | 一例一休 into solver/LLM/compliance (`weekly_rest_days`), **StaffingRequirement** (`apps/shifts/staffing.py`, `/api/shifts/staffing-requirements/`, `coverage` in check-compliance), **email-code self registration** (`apps/accounts/registration.py`, `/api/auth/register/…`, SMTP via env), built-in TW national holidays 2026–2027 (`apps/compliance/tw_holidays.py`, `/api/compliance/holidays/calendar/`) |
 
-Total test count: **264 passing + 1 SQLite-skipped**.
+Total test count: **498 passing + 1 SQLite-skipped** (2026-10-22).
 
 Phase boundaries: Phase 1 = PR1-5, Phase 2 = PR6-10 + integration tests,
 Phase 3 = PR11-13. Stripe payment + labour-law RAG are deferred to Phase 4

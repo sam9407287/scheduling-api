@@ -2,8 +2,12 @@
 Shift serializers
 """
 from rest_framework import serializers
-from .models import ShiftTemplate, ShiftRule, ShiftEmployeePriority, TeamConstraint
+from .models import (
+    ShiftTemplate, ShiftRule, ShiftEmployeePriority, TeamConstraint,
+    StaffingRequirement,
+)
 from apps.employees.models import Certification
+from apps.organizations.models import Organization
 from apps.employees.serializers import CertificationSerializer
 
 
@@ -104,3 +108,65 @@ class ShiftTemplateSerializer(serializers.ModelSerializer):
             'duration_hours', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'duration_hours', 'created_at', 'updated_at']
+
+
+class StaffingRequirementSerializer(serializers.ModelSerializer):
+    """
+    每日人力需求（「每天需要幾個人」）。
+
+    - `shift_template` null ⇒ 當日總人數（不分班別）
+    - `date` 與 `weekday` 最多填一個；都不填 ⇒ 每天
+    - `max_staff` null ⇒ 不設上限；有填必須 ≥ `min_staff`
+    """
+    shift_template_name = serializers.CharField(
+        source='shift_template.name', read_only=True, default=None,
+    )
+    branch_name = serializers.CharField(
+        source='branch.name', read_only=True, default=None,
+    )
+    weekday_label = serializers.SerializerMethodField()
+    # 可省略：非 superuser 一律以登入者的機構為準（防跨機構寫入）
+    organization = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.all(), required=False,
+    )
+
+    class Meta:
+        model = StaffingRequirement
+        fields = [
+            'id', 'organization', 'branch', 'branch_name',
+            'shift_template', 'shift_template_name',
+            'weekday', 'weekday_label', 'date',
+            'min_staff', 'max_staff', 'note', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_weekday_label(self, obj):
+        if obj.weekday is None:
+            return None
+        return ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][obj.weekday]
+
+    def validate(self, data):
+        inst = self.instance
+        get = lambda k, default=None: data.get(k, getattr(inst, k, default) if inst else default)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is not None and not user.is_superuser and user.organization_id:
+            data['organization'] = user.organization
+        elif get('organization') is None:
+            raise serializers.ValidationError({'organization': 'organization is required'})
+        if get('date') is not None and get('weekday') is not None:
+            raise serializers.ValidationError(
+                {'date': 'date 與 weekday 只能擇一（特定日期或每週固定星期）'})
+        min_staff = get('min_staff', 1)
+        max_staff = get('max_staff')
+        if max_staff is not None and max_staff < min_staff:
+            raise serializers.ValidationError({'max_staff': 'max_staff 必須 ≥ min_staff'})
+        org = get('organization')
+        shift = get('shift_template')
+        if shift is not None and org is not None and shift.organization_id != org.id:
+            raise serializers.ValidationError({'shift_template': '班別不屬於此機構'})
+        branch = get('branch')
+        if branch is not None and org is not None and branch.organization_id != org.id:
+            raise serializers.ValidationError({'branch': '分店不屬於此機構'})
+        return data
