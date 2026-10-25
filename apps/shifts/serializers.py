@@ -154,7 +154,11 @@ class StaffingRequirementSerializer(serializers.ModelSerializer):
         if user is not None and not user.is_superuser and user.organization_id:
             data['organization'] = user.organization
         elif get('organization') is None:
-            raise serializers.ValidationError({'organization': 'organization is required'})
+            # superuser 沒明說就用自己綁定的機構；沒綁機構才要求明傳
+            if user is not None and getattr(user, 'organization_id', None):
+                data['organization'] = user.organization
+            else:
+                raise serializers.ValidationError({'organization': 'organization is required'})
         if get('date') is not None and get('weekday') is not None:
             raise serializers.ValidationError(
                 {'date': 'date 與 weekday 只能擇一（特定日期或每週固定星期）'})

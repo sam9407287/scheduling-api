@@ -35,7 +35,25 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         work_date = serializer.validated_data.get('work_date')
         if Attendance.objects.filter(employee=employee, work_date=work_date).exists():
             raise ValidationError({'work_date': '該員工當日已有出勤紀錄。'})
-        serializer.save(employee=employee)
+        attendance = serializer.save(employee=employee)
+        self._recompute(attendance)
+
+    def perform_update(self, serializer):
+        """主管修改上下班時間後，工時與異常由後端重算（不信任前端送來的計算欄位）。"""
+        attendance = serializer.save()
+        self._recompute(attendance)
+
+    def _recompute(self, attendance):
+        """clock_in / clock_out 齊全時重算 actual_hours 並重跑異常檢查。
+        舊的異常紀錄先清掉再重建，避免 PATCH 後殘留已不成立的異常。"""
+        if not (attendance.clock_in and attendance.clock_out):
+            return
+        AnomalyRecord.objects.filter(attendance=attendance, resolved=False).delete()
+        attendance.anomaly_flag = False
+        attendance.anomaly_reason = ''
+        attendance.calculate_hours()
+        self._check_anomalies(attendance)
+        attendance.save(update_fields=['anomaly_flag', 'anomaly_reason'])
 
     def get_queryset(self):
         queryset = super().get_queryset()

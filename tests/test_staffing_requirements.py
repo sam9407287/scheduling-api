@@ -129,6 +129,14 @@ class TestCrud:
         assert body['weekday_label'] == '週六'
         assert body['shift_template_name'] == shift.name
 
+    def test_superuser_with_org_defaults_org_when_omitted(self, admin_user, organization):
+        """superuser 綁有機構時，沒傳 organization 也用自己的機構（前端只在 user.organization 存在時才送）。"""
+        from rest_framework.test import APIClient
+        c = APIClient(); c.force_authenticate(user=admin_user)
+        resp = c.post(URL, {'min_staff': 1}, format='json')
+        assert resp.status_code == 201, resp.content
+        assert resp.json()['organization'] == admin_user.organization_id == organization.id
+
     def test_day_total_rule_without_shift(self, manager_api_client):
         resp = manager_api_client.post(URL, {'min_staff': 3, 'max_staff': 5}, format='json')
         assert resp.status_code == 201, resp.content

@@ -247,9 +247,10 @@ Quick reference for "which commit introduced X":
 | `4b9848d` | docs: ARCHITECTURE.md + BUSINESS_FLOWS.md + refreshed CLAUDE.md |
 | `7e73b42` | PR11 (Phase 3): soft vs hard labour-law rule severity + OrgComplianceSettings |
 | `f1933ce` | PR12 (Phase 3): monthly usage threshold alerts (Celery beat, console email) |
+| 2026-10-26 | Manager-created/edited attendance recomputes `actual_hours` + anomalies (`AttendanceViewSet._recompute`); staffing-requirement `organization` defaults to the caller's org for superusers too; `manage.py send_test_email` for SMTP verification; `docs/FRONTEND_TODO_2026-10-26.md` (holiday `makeup` = 補假日, not 補班日) |
 | 2026-10-22 | 一例一休 into solver/LLM/compliance (`weekly_rest_days`), **StaffingRequirement** (`apps/shifts/staffing.py`, `/api/shifts/staffing-requirements/`, `coverage` in check-compliance), **email-code self registration** (`apps/accounts/registration.py`, `/api/auth/register/…`, SMTP via env), built-in TW national holidays 2026–2027 (`apps/compliance/tw_holidays.py`, `/api/compliance/holidays/calendar/`) |
 
-Total test count: **498 passing + 1 SQLite-skipped** (2026-10-22).
+Total test count: **504 passing + 1 SQLite-skipped** (2026-10-26).
 
 Phase boundaries: Phase 1 = PR1-5, Phase 2 = PR6-10 + integration tests,
 Phase 3 = PR11-13. Stripe payment + labour-law RAG are deferred to Phase 4

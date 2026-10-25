@@ -131,3 +131,31 @@ Run this list after every production deploy. It is short by design — automate 
 - `/admin/` login works over HTTPS; session cookies are `Secure`.
 - Worker logs show Celery heartbeat; no unhandled exceptions in the last 15 minutes.
 - Budget alert visible and active on the Railway project.
+
+## Email（註冊驗證碼）SMTP 設定 — 2026-10-26
+
+`POST /api/auth/register/send-code/` 透過 Django `EMAIL_BACKEND` 寄 6 碼驗證碼。
+`config/settings/base.py` 的規則：**有設 `EMAIL_HOST_USER` 就自動走 SMTP，沒設就是 console backend**
+（API 照樣回 200，但信只印在 log，使用者收不到）。Railway `web` 服務目前（2026-10-26）尚未設定。
+
+1. 到 Google 帳號 → 安全性 → 兩步驟驗證（必須先開）→ 應用程式密碼，建立一組 16 碼密碼。
+2. 寫進 Railway（整串重設，不是附加）：
+
+   ```bash
+   railway variables --service web \
+     --set "EMAIL_HOST_USER=<寄件 Gmail>" \
+     --set "EMAIL_HOST_PASSWORD=<16 碼應用程式密碼，去掉空格>" \
+     --set "DEFAULT_FROM_EMAIL=智慧排班系統 <寄件 Gmail>"
+   ```
+
+   其餘有預設值：`EMAIL_HOST=smtp.gmail.com`、`EMAIL_PORT=587`、`EMAIL_USE_TLS=true`、`EMAIL_TIMEOUT=15`。
+   改用其他 SMTP（SendGrid / Mailgun / 公司 Exchange）只要覆蓋這幾個即可。
+3. 變數改完要重新部署才生效：`railway up --service web --detach`，等 `railway deployment list --service web --json` 出現 SUCCESS。
+4. 驗證（不經節流、不寫 DB）：
+
+   ```bash
+   railway ssh --service web -- python manage.py send_test_email you@example.com
+   ```
+
+   成功印 `已寄出測試信到 …`；失敗會把 SMTP 原始錯誤印出（最常見：`535 Username and Password not accepted` = 應用程式密碼錯或兩步驟驗證沒開；`Connection timed out` = 出站 587 被擋，改 `EMAIL_PORT=465` + `EMAIL_USE_SSL=true EMAIL_USE_TLS=false`）。
+5. 再從前端註冊頁按「取得驗證碼」做一次端到端。寄失敗時 API 回 503，不會假裝寄出。

@@ -22,7 +22,8 @@ class AttendanceSerializer(serializers.ModelSerializer):
             'is_cross_branch', 'cross_branch', 'anomaly_flag',
             'anomaly_reason', 'notes', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        # anomaly_* 由後端異常檢查決定；actual_hours 在 clock_in/clock_out 齊全時由後端重算覆蓋
+        read_only_fields = ['id', 'anomaly_flag', 'anomaly_reason', 'created_at', 'updated_at']
         # unique_together(employee, work_date) 會讓 DRF 把 employee_id 變成必填；
         # 改在 view.perform_create 決定 employee 後再檢查重複。
         validators = []

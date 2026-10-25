@@ -794,6 +794,11 @@ contact, but treat the banner as the user-facing signal).
 GET/POST  /api/attendance/attendances/?employee=&work_date=
           // POST body: { "employee_id": 12, "work_date": "2026-10-10", "actual_hours": "8.00", ... }
           // employee_id 省略 = 本人打卡（帳號須有員工檔案，否則 400）；跨機構 400（2026-10-13）
+          // 管理者代建：{ employee_id, work_date, clock_in, clock_out, notes }（ISO datetime，可跨日）
+          // clock_in + clock_out 齊全時 actual_hours 由後端重算覆蓋，並重跑異常檢查（超時 / 遲到 /
+          // 早退 / 無排班出勤）；anomaly_flag / anomaly_reason 為 read-only（2026-10-26）
+PATCH/DELETE /api/attendance/attendances/{id}/
+          // PATCH 可改 clock_in / clock_out / notes；改完同樣重算工時與異常，舊的未解決異常先清掉
 GET/POST  /api/attendance/anomalies/
 GET/POST  /api/overtime/records/
 GET/POST  /api/overtime/rules/
