@@ -264,6 +264,25 @@ class EmployeeAvailability(models.Model):
         verbose_name='特殊規則（自然語言）',
         help_text='例如：只能排上午班；週三不可排班；盡量安排連續班次',
     )
+    # --- 一例一休 / 國定假日意願（2026-10-31）---
+    # 例假（每 7 日 1 天）是法定不可出勤，員工同意也不能免除，所以沒有開關。
+    # 休息日（第 6 天）出勤合法但要員工同意＋加班費：這裡記「願不願意」。
+    rest_day_work_ok = models.BooleanField(
+        default=False,
+        verbose_name='願意上休息日（每週第 6 天，需加班費）',
+    )
+    HOLIDAY_WORK_CHOICES = [
+        ('forbid', '不可排國定假日'),
+        ('allow', '可排（不特別偏好）'),
+        ('prefer', '偏好排假日班'),
+        ('avoid', '不優先（必要時仍可排）'),
+    ]
+    holiday_work = models.CharField(
+        max_length=10,
+        choices=HOLIDAY_WORK_CHOICES,
+        default='allow',
+        verbose_name='國定假日排班意願',
+    )
     effective_from = models.DateField(
         null=True,
         blank=True,
@@ -283,6 +302,26 @@ class EmployeeAvailability(models.Model):
 
     def __str__(self):
         return f"{self.employee.employee_id} availability"
+
+
+# 沒建立 availability 的員工沿用這組預設（與欄位 default 一致）。
+DEFAULT_SCHEDULING_PREFS = {'rest_day_work_ok': False, 'holiday_work': 'allow'}
+
+
+def scheduling_prefs_for(employee) -> dict:
+    """Solver / LLM / 合規檢查共用：員工的休息日與國定假日意願。
+
+    回傳 {'rest_day_work_ok': bool, 'holiday_work': str}；
+    員工尚未建立 EmployeeAvailability 時回預設值。
+    """
+    try:
+        avail = employee.availability
+    except EmployeeAvailability.DoesNotExist:
+        return dict(DEFAULT_SCHEDULING_PREFS)
+    return {
+        'rest_day_work_ok': bool(avail.rest_day_work_ok),
+        'holiday_work': avail.holiday_work or 'allow',
+    }
 
 
 class EmployeeTimeSlot(models.Model):

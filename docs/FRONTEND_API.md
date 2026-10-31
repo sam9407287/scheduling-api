@@ -221,6 +221,9 @@ PUT body
 {
   "required_hours_per_week": "36.00",
   "special_rules": "週三不可排班",
+  // 2026-10-31 新增：一例一休休息日同意 + 國定假日排班意願（見 docs/FRONTEND_TODO_2026-10-31.md）
+  "rest_day_work_ok": false,        // 願意上「休息日」（每週第 6 天，需加班費）。預設 false
+  "holiday_work": "allow",          // forbid | allow | prefer | avoid，預設 allow
   "time_slots": [
     { "slot_type": "blocked",   "day_of_week": 2, "start_time": "08:00", "end_time": "12:00" },
     { "slot_type": "preferred", "day_of_week": null, "start_time": "09:00", "end_time": "17:00" }
@@ -228,7 +231,23 @@ PUT body
 }
 // slot_type: blocked (hard) | preferred (soft); day_of_week: 0=Mon..6=Sun, null=every day
 // GET returns 204 when no availability has been created yet
+// GET 多回 "holiday_work_display": "偏好排假日班"（中文標籤）
 ```
+
+`rest_day_work_ok` / `holiday_work` 的意思（勞基法 §36 一例一休 = 例假 1 天 + 休息日 1 天）：
+
+| 欄位 | 值 | AI 排班 / 派生合規版 | 合規檢查 |
+|---|---|---|---|
+| `rest_day_work_ok` | `false`（預設） | 每週硬守 ≤ 5 天 | 上 6 天 → `weekly_rest_days` soft |
+| | `true` | 人力不足時可排第 6 天（休息日，當加班成本）；第 7 天（例假）任何人都不可 | 同上 |
+| `holiday_work` | `forbid` | 國定假日硬性不排 | 排了 → **`holiday_work_refused` hard** |
+| | `allow` | 中立 | `holiday_scheduling` soft |
+| | `prefer` | 假日要人時優先用他 | 同上 |
+| | `avoid` | 盡量不用，但沒人時仍會排 | 同上 |
+
+員工列表 / 詳情（`GET /api/employees/employees/`、`/{id}/`）多一個唯讀欄位
+`scheduling_prefs: { "rest_day_work_ok": false, "holiday_work": "allow" }`，
+沒建 availability 的員工回預設值——班表上做徽章用這個，不用逐人打 availability。
 
 ### 2.2 Data consent  (employee self-action)
 
@@ -469,7 +488,13 @@ Render `coverage` on the day/shift header（例：「1/2」紅字），not on em
 **一例一休（§36，2026-10-22 進規則）** — `weekly_rest_days`：每 ISO 週（週一～週日）
 應休 2 天。`detail.rest_days` 0 ⇒ `severity: "hard"`（例假日出勤，紅）、1 ⇒ `"soft"`
 （休息日出勤，需加班費，黃）；`detail.regular_day_off_worked` 直接告訴你是哪一種。
-只判「版本期間完整涵蓋」的週。AI 排班／派生合規版會自動守住每週 ≤ 5 天（見 §5、§5.1）。
+只判「版本期間完整涵蓋」的週。AI 排班／派生合規版會自動守住每週 ≤ 5 天；員工
+`rest_day_work_ok: true`（§2.1）時 AI 可在人力不足時排到第 6 天（見 §5、§5.1）。
+
+**國定假日意願（2026-10-31）** — 員工 `holiday_work: "forbid"` 卻被手動排在國定假日
+（內建假日表＋機構自訂）時，回 `rule: "holiday_work_refused"`、`severity: "hard"`（紅），
+`detail: { "holiday_name": "行憲紀念日", "holiday_work": "forbid" }`；其他意願照舊回
+soft 的 `holiday_scheduling`（`detail.holiday_work` 一併帶回，可顯示「偏好／不優先」）。
 
 New rule codes (labels come back in `rule_label`, already 中文):
 `max_daily_total_hours` / `max_monthly_overtime_hours` are HARD by default;
@@ -633,7 +658,7 @@ POST /api/ai/schedule/generate/
   "employee_ids": [12, 17],        // optional, default = all active
   "shift_template_ids": [4, 5],    // optional, default = all active
   "constraints": {}, "preferences": {},
-  "enforce_labor_law": false,      // true = labour law as hard constraints（週工時、連續天數、間隔、日工時、一例一休 每週≤5天）
+  "enforce_labor_law": false,      // true = labour law as hard constraints（週工時、連續天數、間隔、日工時、一例一休：未同意休息日者 ≤5 天、同意者 ≤6 天、例假誰都不行）
   "soft_rule_types": [],           // optional per-call soft labour rules
   "consume_token": true,
   "run_async": false,
@@ -659,7 +684,18 @@ POST /api/ai/schedule/generate/
   "metadata": {
     "status": "OPTIMAL", "mode": "generate",
     "billing": { "billing_mode": "generate", "tokens_charged": 10,
-                 "period_usage_after": 10, "consume_token": true }
+                 "period_usage_after": 10, "consume_token": true },
+    // 2026-10-31：期間排休配額摘要（派生合規版為 null）
+    "rest_quota": {
+      "period_days": 30, "weekly_rest_days": 9, "holiday_days": 4,
+      "holidays": ["2026-10-09", "2026-10-10", "2026-10-25", "2026-10-26"],
+      "rest_days_total": 13, "work_days_max": 17,
+      "employees": [
+        { "employee_id": 12, "applies": true,  "work_days": 17, "rest_days": 13,
+          "holiday_days_worked": 2, "work_days_max": 17, "over_quota": 0 },
+        { "employee_id": 17, "applies": false, "work_days": 9,  "rest_days": 21,   // 時薪制不套配額
+          "holiday_days_worked": 0, "work_days_max": null, "over_quota": 0 } ]
+    }
   }
 }
 // 202 (run_async:true) → { "task_id": "…", "status": "pending", "billing": { … } }
@@ -669,6 +705,40 @@ POST /api/ai/schedule/generate/
 ```
 `success:false` with a `violations` array means the solver could not find a
 schedule (still billed — pre-debit). Show the message.
+
+AI 排班自動帶入（不用前端傳）：機構公休日、每日人力需求、**國定假日**（內建表＋機構自訂）、
+每位員工的 `rest_day_work_ok` / `holiday_work` / `pay_type`。行為：
+
+- **一例一休**：每週 ≤ 5 天；`rest_day_work_ok: true` 的員工人力不足時可上第 6 天（休息日），
+  第 7 天（例假）誰都不行。先用願意的人，再用不願意的人（後者等於硬約束，排不出就 `success:false`）。
+- **國定假日**：`forbid` 硬性不排；假日要人時依 `prefer` → `allow` → `avoid` 順序用人；`avoid` 沒人時仍會被排。
+- **期間排休配額**（月薪制 `pay_type: "monthly"`）：上班天數 ≤ 期間天數 − 週休（2 天/週按比例四捨五入）
+  − 期間內國定假日數。假日有上班的人，solver 會在別天多給一天休（＝補休）。
+  超過配額是軟約束（人力真的不夠時全員平攤），`metadata.rest_quota.employees[].over_quota` 告訴你誰超了。
+  時薪制不套配額（假日出勤直接加倍、不補休，與 §8 加給分流一致）。
+
+### 5.0 期間排休試算（免費、不計費、不跑 solver）  (`manager`)
+
+使用者選完排班期間就打這支，在按「AI 排班」之前先顯示「這段期間休幾天、上幾天」：
+
+```jsonc
+GET /api/ai/schedule/rest-quota/?period_start=2026-10-01&period_end=2026-10-30[&branch_id=3][&weekly_rest_days=2]
+// 200
+{ "period_days": 30, "weekly_rest_days": 9, "holiday_days": 4,
+  "rest_days_total": 13, "work_days_max": 17,
+  "holidays": [ { "date": "2026-10-09", "name": "國慶日補假", "kind": "makeup" },
+                { "date": "2026-10-10", "name": "國慶日",     "kind": "holiday" }, … ],
+  "employees": [
+    { "employee_id": 12, "employee_code": "E0042", "name": "王小明",
+      "pay_type": "monthly", "contract_type": "full_time",
+      "applies": true, "work_days_max": 17,
+      "rest_day_work_ok": false, "holiday_work": "prefer" },
+    { "employee_id": 17, "employee_code": "E0051", "name": "李小華",
+      "pay_type": "hourly", "contract_type": "part_time",
+      "applies": false, "work_days_max": null,
+      "rest_day_work_ok": true, "holiday_work": "allow" } ] }
+// 400 缺 period_start/period_end、結束早於開始、超過 366 天
+```
 
 ---
 
@@ -712,7 +782,8 @@ POST /api/ai/schedule/llm-generate/
   第二個班進 `rejected`（reason「同一天已有班次（本次設定為一天一班）」），版本裡既有的班也算。
   設 `true` 時模型可為同一人在同一天排不同崗位（時間不重疊、每日 ≤12h）。請在 AI 排班對話框放 checkbox。
 - **七休一**：模型輸出若讓某人連續工作超過 6 天，第 7 天起的班次會進 `rejected`（reason 含「七休一」），版本內既有班次也算進連續天數。
-- **一例一休（2026-10-22）**：prompt 要求每人每週（週一～週日）最多上 5 天；模型還是多排時，同一週第 6 天起的班次進 `rejected`（reason 含「一例一休」），版本內既有班次也算。
+- **一例一休（2026-10-22；2026-10-31 加休息日同意）**：prompt 要求每人每週（週一～週日）最多上 5 天；`rest_day_work_ok: true` 的員工可到 6 天。模型還是多排時，超過的班次進 `rejected`（reason 含「一例一休」＋「員工未同意休息日出勤」或「例假不得出勤」），版本內既有班次也算。
+- **國定假日意願（2026-10-31）**：假日表、每人 `holiday_work` / `rest_day_work_ok` / 月薪制 `work_days_max` 都進 prompt；`forbid` 的員工被模型排在假日時進 `rejected`（reason「該員工設定不可排國定假日」）。prefer / avoid / 排休配額只是 prompt 指示，不在驗證層硬擋。
 - **每日人力需求（2026-10-22，§3.2）**：規則人數進 prompt；超過 `max_staff` 的列進 `rejected`（reason 含「人數上限」）；缺口 `warnings` 以規則人數為準。
 - **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時後端有 150 秒總預算上限，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），

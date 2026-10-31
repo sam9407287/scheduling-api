@@ -30,12 +30,17 @@ SYSTEM_PROMPT_TEMPLATE = """你是排班助手。根據提供的員工、班別�
    也不可排在機構公休日(org.closed_weekdays, 0=週一)，公休日整天不排任何班。
 __SAME_DAY_RULE__
 6. 一例一休：每人每週（週一到週日）最多只能上 5 天班、至少休 2 天，
-   且連續工作不得超過 6 天。
+   且連續工作不得超過 6 天。只有 rest_day_work_ok 為 true 的員工，在人力
+   不足時才可以排第 6 天（休息日加班）；任何人都不可以一週上 7 天（例假）。
 7. 每人每週總工時不得超過該員工的 weekly_hours；weekly_hours 較低的是兼職，
    班數要明顯少於全職。
 8. 期間內每位員工都要被排到班（除非整段期間都請假或不可排）；
    人力要平均分配，不要集中在少數人身上。
 9. 盡量遵守：優先排 priority_employee_ids 名單靠前的員工。
+10. 國定假日（org.holidays）：holiday_work 為 forbid 的員工絕不可排在假日；
+    prefer 的優先排假日班、avoid 的盡量不排（必要時仍可排）、allow 中立。
+11. 排休配額（rest_quota）：work_days_max 不為 null 的員工（月薪制）在期間內
+    的上班天數不要超過 work_days_max；假日有上班的人要在其他天補休。
 
 只輸出 JSON，格式：
 {"assignments": [{"employee_id": 1, "date": "YYYY-MM-DD", "shift_id": 2}, ...]}
@@ -80,6 +85,14 @@ def build_context(version, period_start, period_end):
     ).first()
     closed_weekdays = sorted(set(cfg.weekly_closed_days or [])) if cfg else []
 
+    # 國定假日 + 期間排休配額 + 員工休息日/假日意願（2026-10-31）
+    from apps.compliance.tw_holidays import holiday_calendar
+    from apps.employees.models import scheduling_prefs_for
+    from .rest_quota import compute_rest_quota, quota_applies
+    holidays = holiday_calendar(version.organization, period_start, period_end)
+    quota = compute_rest_quota(period_start, period_end, [h['date'] for h in holidays])
+    prefs = {e.pk: scheduling_prefs_for(e) for e in employees}
+
     blocked_weekdays = {}
     for emp in employees:
         try:
@@ -106,7 +119,12 @@ def build_context(version, period_start, period_end):
     payload = {
         'period': {'start': period_start.isoformat(), 'end': period_end.isoformat(),
                    'dates': [d.isoformat() for d in days]},
-        'org': {'closed_weekdays': closed_weekdays},
+        'org': {
+            'closed_weekdays': closed_weekdays,
+            'holidays': [{'date': h['date'].isoformat(), 'name': h['name']} for h in holidays],
+        },
+        'rest_quota': {k: quota[k] for k in (
+            'period_days', 'weekly_rest_days', 'holiday_days', 'work_days_max')},
         'staffing_requirements': plan,
         'employees': [
             {
@@ -114,8 +132,13 @@ def build_context(version, period_start, period_end):
                 'name': (e.user.get_full_name() or e.user.username) if e.user else e.employee_id,
                 'cert_ids': [c.pk for c in e.certifications.all()],
                 'weekly_hours': float(e.agreed_hours_per_week),
+                'pay_type': e.pay_type,
                 'leave_dates': leave_map.get(e.pk, []),
                 'blocked_weekdays': blocked_weekdays.get(e.pk, []),
+                'rest_day_work_ok': prefs[e.pk]['rest_day_work_ok'],
+                'holiday_work': prefs[e.pk]['holiday_work'],
+                'work_days_max': (quota['work_days_max']
+                                  if quota_applies({'pay_type': e.pay_type}) else None),
             }
             for e in employees
         ],
@@ -143,6 +166,8 @@ def build_context(version, period_start, period_end):
         'blocked_weekdays': blocked_weekdays,
         'dates': {d.isoformat() for d in days},
         'closed_weekdays': set(closed_weekdays),
+        'holidays': {h['date'].isoformat() for h in holidays},
+        'prefs': prefs,
         'out_of_scope_employees': out_of_scope,
         'staffing': plan_index(plan),
     }
@@ -155,8 +180,10 @@ def employee_display(emp):
 
 
 MAX_CONSECUTIVE_DAYS = 6
-# 一例一休（§36）：每七日應有二日之休息 ⇒ 每 ISO 週最多上 5 天
+# 一例一休（§36）：每七日應有二日之休息 ⇒ 每 ISO 週最多上 5 天；
+# 員工同意休息日出勤（rest_day_work_ok）時可到 6 天，第 7 天是例假、誰都不行。
 MAX_WORK_DAYS_PER_WEEK = 5
+MAX_WORK_DAYS_WITH_REST_DAY_CONSENT = 6
 
 
 def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=False):
@@ -202,6 +229,10 @@ def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=Fa
         if date_cls.fromisoformat(date_str).weekday() in lookups.get('closed_weekdays', set()):
             rejected.append({'row': row, 'reason': '機構公休日'})
             continue
+        if (date_str in lookups.get('holidays', set())
+                and lookups.get('prefs', {}).get(emp_id, {}).get('holiday_work') == 'forbid'):
+            rejected.append({'row': row, 'reason': '該員工設定不可排國定假日'})
+            continue
         key = (emp_id, date_str, shift_id)
         if key in seen or key in existing:
             rejected.append({'row': row, 'reason': '重複班次（已存在或模型重複輸出）'})
@@ -215,7 +246,7 @@ def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=Fa
 
     valid, overrun = _drop_consecutive_overruns(valid, existing)
     rejected.extend(overrun)
-    valid, overrun = _drop_weekly_rest_overruns(valid, existing)
+    valid, overrun = _drop_weekly_rest_overruns(valid, existing, lookups.get('prefs') or {})
     rejected.extend(overrun)
     valid, overrun = _drop_over_max_staff(valid, existing, lookups.get('staffing') or {})
     rejected.extend(overrun)
@@ -257,11 +288,13 @@ def _drop_consecutive_overruns(valid, existing):
     return kept, dropped
 
 
-def _drop_weekly_rest_overruns(valid, existing):
-    """一例一休（§36）：同一 ISO 週（週一～週日）上班超過 5 天的新班次丟棄。
+def _drop_weekly_rest_overruns(valid, existing, prefs=None):
+    """一例一休（§36）：同一 ISO 週（週一～週日）上班超過上限的新班次丟棄。
 
-    已在版本裡的班次算進當週天數；同一天多班只算一天。
+    上限：未同意休息日出勤 5 天；rest_day_work_ok=True 的員工 6 天（第 7 天
+    是例假，誰都不能上）。已在版本裡的班次算進當週天數；同一天多班只算一天。
     """
+    prefs = prefs or {}
     worked = {}
     for emp_id, date_str, _ in existing:
         worked.setdefault(emp_id, set()).add(date_cls.fromisoformat(date_str))
@@ -272,12 +305,15 @@ def _drop_weekly_rest_overruns(valid, existing):
         if day in days:
             kept.append(row)
             continue
+        consents = bool(prefs.get(emp_id, {}).get('rest_day_work_ok'))
+        cap = MAX_WORK_DAYS_WITH_REST_DAY_CONSENT if consents else MAX_WORK_DAYS_PER_WEEK
         week_start = day - timedelta(days=day.weekday())
         in_week = sum(1 for d in days if 0 <= (d - week_start).days <= 6)
-        if in_week >= MAX_WORK_DAYS_PER_WEEK:
+        if in_week >= cap:
+            why = ('例假不得出勤' if consents else '員工未同意休息日出勤')
             dropped.append({
                 'row': {'employee_id': emp_id, 'date': row['date'], 'shift_id': row['shift'].pk},
-                'reason': f'當週已上滿 {MAX_WORK_DAYS_PER_WEEK} 天（一例一休）',
+                'reason': f'當週已上滿 {cap} 天（一例一休：{why}）',
             })
             continue
         days.add(day)

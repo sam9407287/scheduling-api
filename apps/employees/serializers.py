@@ -77,7 +77,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
         required=False
     )
     contracts = ContractSerializer(many=True, read_only=True)
-    
+    scheduling_prefs = serializers.SerializerMethodField()
+
     class Meta:
         model = Employee
         fields = [
@@ -85,9 +86,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'branch', 'branch_name', 'position', 'contract_type', 'contract_type_display',
             'pay_type', 'pay_type_display',
             'agreed_hours_per_week', 'certifications', 'certification_ids',
-            'hire_date', 'is_active', 'contracts', 'created_at', 'updated_at'
+            'hire_date', 'is_active', 'contracts', 'scheduling_prefs',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_scheduling_prefs(self, obj):
+        # 唯讀摘要；要改請走 /availability/（rest_day_work_ok / holiday_work）
+        from .models import scheduling_prefs_for
+        return scheduling_prefs_for(obj)
 
     def validate(self, attrs):
         user_data = attrs.get('user')
@@ -224,6 +231,8 @@ class EmployeeAvailabilitySerializer(serializers.ModelSerializer):
     先刪除舊的，再批量建立新的。這樣前端只需維護一份完整清單。
     """
     time_slots = EmployeeTimeSlotSerializer(many=True, required=False)
+    holiday_work_display = serializers.CharField(
+        source='get_holiday_work_display', read_only=True)
 
     class Meta:
         model = EmployeeAvailability
@@ -231,6 +240,9 @@ class EmployeeAvailabilitySerializer(serializers.ModelSerializer):
             'id', 'employee',
             'required_hours_per_week',
             'special_rules',
+            # 2026-10-31：一例一休休息日意願 + 國定假日排班意願
+            'rest_day_work_ok',
+            'holiday_work', 'holiday_work_display',
             'effective_from', 'effective_to',
             'time_slots',
             'created_at', 'updated_at',
@@ -265,12 +277,18 @@ class EmployeeListSerializer(serializers.ModelSerializer):
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     certification_count = serializers.IntegerField(source='certifications.count', read_only=True)
-    
+    scheduling_prefs = serializers.SerializerMethodField()
+
     class Meta:
         model = Employee
         fields = [
             'id', 'employee_id', 'user', 'user_name', 'user_email',
             'organization', 'branch',
             'organization_name', 'branch_name', 'position',
-            'contract_type', 'pay_type', 'is_active', 'certification_count', 'hire_date'
+            'contract_type', 'pay_type', 'is_active', 'certification_count', 'hire_date',
+            'scheduling_prefs',
         ]
+
+    def get_scheduling_prefs(self, obj):
+        from .models import scheduling_prefs_for
+        return scheduling_prefs_for(obj)

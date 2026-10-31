@@ -57,7 +57,7 @@ class ContractViewSet(viewsets.ModelViewSet):
 
 class EmployeeViewSet(viewsets.ModelViewSet):
     """Employee management"""
-    queryset = Employee.objects.select_related('user', 'organization', 'branch').prefetch_related('certifications', 'contracts')
+    queryset = Employee.objects.select_related('user', 'organization', 'branch', 'availability').prefetch_related('certifications', 'contracts')
     permission_classes = [IsSupervisor]
 
     def get_permissions(self):

@@ -3,7 +3,7 @@ OR-Tools Provider Implementation
 """
 import copy
 from datetime import date, datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from ortools.sat.python import cp_model
 from .base import (
     BaseScheduleProvider,
@@ -12,6 +12,7 @@ from .base import (
     ComplianceReport,
     ChangeImpact,
 )
+from ..rest_quota import quota_from_constraints, quota_applies
 
 
 class ORToolsProvider(BaseScheduleProvider):
@@ -124,6 +125,10 @@ class ORToolsProvider(BaseScheduleProvider):
                         'status': 'OPTIMAL' if status == cp_model.OPTIMAL else 'FEASIBLE',
                         'mode': mode,
                         'time_decay_n': request.time_decay_n if mode == 'derive_legal' else None,
+                        # 期間排休配額摘要（constraints 有 holidays 才有，否則 None）
+                        'rest_quota': self._rest_quota_report(
+                            employees, days, request.constraints, result_assignments,
+                        ),
                     },
                 )
             else:
@@ -592,6 +597,17 @@ class ORToolsProvider(BaseScheduleProvider):
                     for shift in shifts:
                         model.Add(assignments[emp_id][day_idx][shift['id']] == 0)
 
+        # 3b. 國定假日意願 holiday_work='forbid'（2026-10-31）：該員工在
+        #     constraints['holidays'] 的日子全班別禁排（視同不可用日）。
+        holiday_idx = self._holiday_day_indexes(days, constraints)
+        if holiday_idx:
+            for emp in employees:
+                if emp.get('holiday_work') != 'forbid':
+                    continue
+                for day_idx in holiday_idx:
+                    for shift in shifts:
+                        model.Add(assignments[emp['id']][day_idx][shift['id']] == 0)
+
         # 4. 員工必須持有班別所需的全部證照
         for shift in shifts:
             shift_id = shift['id']
@@ -788,7 +804,94 @@ class ORToolsProvider(BaseScheduleProvider):
             )
         )
 
+        # --- 7. 國定假日排班意願 + 8. 期間排休配額（2026-10-31）---
+        objective_terms.extend(
+            self._add_holiday_and_quota_terms(
+                model, assignments, employees, shifts, days, constraints
+            )
+        )
+
         return objective_terms
+
+    # 國定假日當天「有上班」的懲罰，依員工意願分級。全部 ≥ 0：用「獎勵」會讓
+    # solver 為了領獎勵多排不必要的假日班（人力過剩）；用分級懲罰則只在
+    # 假日真的需要人時，先用 prefer、再 allow、最後 avoid。forbid 走硬約束。
+    # 最大差距 6 仍低於公平性權重 10，意願是 tie-breaker 不是規則。
+    HOLIDAY_WORK_PENALTY = {'prefer': 0, 'allow': 3, 'avoid': 6}
+    # 月薪制員工期間工作天數超過配額（期間天數 − 週休 − 國定假日）每天的懲罰。
+    # 低於公平性 10：人力真的不夠時由全員平均分擔，而不是 INFEASIBLE。
+    REST_QUOTA_WEIGHT = 8
+
+    def _add_holiday_and_quota_terms(
+        self,
+        model: cp_model.CpModel,
+        assignments: Dict,
+        employees: List[Dict],
+        shifts: List[Dict],
+        days: List[date],
+        constraints: Dict[str, Any],
+    ) -> List:
+        terms: List = []
+        num_days = len(days)
+        holiday_idx = self._holiday_day_indexes(days, constraints)
+        quota = quota_from_constraints(days, constraints)
+        if not holiday_idx and not quota:
+            return terms
+        day_work = self._day_work_vars(model, assignments, employees, shifts, num_days)
+        for emp in employees:
+            emp_id = emp['id']
+            # 7. 假日意願：prefer 0 / allow 3 / avoid 6（forbid 已在硬約束擋掉）
+            penalty = self.HOLIDAY_WORK_PENALTY.get(emp.get('holiday_work', 'allow'), 3)
+            if holiday_idx and penalty > 0:
+                for day_idx in holiday_idx:
+                    terms.append(penalty * day_work[emp_id][day_idx])
+            # 8. 期間排休配額：月薪制員工工作天數 ≤ work_days_max，超出重罰
+            if quota and quota_applies(emp):
+                over = model.NewIntVar(0, num_days, f'quota_over_e{emp_id}')
+                model.Add(sum(day_work[emp_id]) - quota['work_days_max'] <= over)
+                terms.append(self.REST_QUOTA_WEIGHT * over)
+        return terms
+
+    @staticmethod
+    def _holiday_day_indexes(days: List[date], constraints: Dict[str, Any]) -> List[int]:
+        """constraints['holidays']（ISO 日期字串或 date）→ 期間內的 day_idx 清單。"""
+        raw = constraints.get('holidays') or []
+        wanted = set()
+        for h in raw:
+            wanted.add(h.isoformat() if isinstance(h, date) else str(h)[:10])
+        return [i for i, d in enumerate(days) if d.isoformat() in wanted]
+
+    def _rest_quota_report(
+        self,
+        employees: List[Dict],
+        days: List[date],
+        constraints: Dict[str, Any],
+        result_assignments: List[Dict],
+    ) -> Optional[Dict[str, Any]]:
+        """求解後的排休摘要（給前端顯示「這段期間休幾天、誰超過配額」）。"""
+        quota = quota_from_constraints(days, constraints)
+        if not quota:
+            return None
+        holidays = set(quota['holidays'])
+        worked: Dict[int, set] = {}
+        for a in result_assignments:
+            worked.setdefault(a['employee_id'], set()).add(a['date'])
+        rows = []
+        for emp in employees:
+            emp_id = emp['id']
+            days_worked = worked.get(emp_id, set())
+            applies = quota_applies(emp)
+            rows.append({
+                'employee_id': emp_id,
+                'applies': applies,
+                'work_days': len(days_worked),
+                'rest_days': quota['period_days'] - len(days_worked),
+                'holiday_days_worked': len(days_worked & holidays),
+                'work_days_max': quota['work_days_max'] if applies else None,
+                'over_quota': (max(0, len(days_worked) - quota['work_days_max'])
+                               if applies else 0),
+            })
+        return {**quota, 'employees': rows}
 
     # Pattern-preference penalty weights. Chosen below the fairness weight
     # (=10) so they only act as a tie-breaker; raising them would let an
@@ -905,6 +1008,9 @@ class ORToolsProvider(BaseScheduleProvider):
     # will not make the whole solve INFEASIBLE. Customer wants every
     # labour-law hit *shown*, not necessarily *blocked*.
     SOFT_LABOR_WEIGHT = 50
+    # 休息日（每週第 6 天）出勤懲罰：只對 rest_day_work_ok=True 的員工生效，
+    # 當成加班成本（低於公平性 10，不會為了省它而把班集中到別人身上）。
+    REST_DAY_WORK_OK_WEIGHT = 2
 
     def _add_labor_law_hard_constraints(
         self,
@@ -930,8 +1036,8 @@ class ORToolsProvider(BaseScheduleProvider):
           3. min_rest_hours        — for every ordered (day_i, shift_a) →
              (day_j, shift_b) pair whose rest gap < threshold (cross-midnight
              aware), the two cells cannot both go to the same employee.
-          2b. weekly_rest_days     — 一例一休（§36）：每 ISO 週工作天數
-             ≤ 7 − weekly_rest_days（預設 2 ⇒ 每週最多上 5 天）。
+          2b. weekly_rest_days     — 一例一休（§36）：例假 hard（每 ISO 週
+             ≤ 6 天）＋ 休息日 soft（第 6 天依員工 rest_day_work_ok 分級罰）。
         """
         soft = set(soft_rule_types or ())
         penalty_terms: List = []
@@ -999,27 +1105,41 @@ class ORToolsProvider(BaseScheduleProvider):
                         model.Add(window_sum <= max_consec)
 
         # --- 2b. 一例一休（§36）：每七日應有二日之休息 ---
-        # 以 ISO 週（週一～週日）為單位，每週工作天數 ≤ 7 − weekly_rest_days
-        # （預設 2 → 最多 5 天）。期間頭尾的不完整週只約束期間內的日子，
-        # 對 ≤5 天的殘週自然不綁；完整週才真正生效。soft 時改為重罰項。
+        # 2026-10-31 拆成兩層，與合規引擎的 hard/soft 分層對齊：
+        #   例假 1 天    → hard：每 ISO 週最多上 6 天（例假出勤除天災事變外不得為之）
+        #   休息日其餘天 → 第 6 天出勤合法，但依法要「勞工同意」＋加班費：
+        #       員工 rest_day_work_ok=True  → soft，每天罰 2（只當加班成本）
+        #       員工 rest_day_work_ok=False → 沒同意就不能排 ⇒ 仍是 hard ≤ 5 天
+        #         （與 2026-10-22 行為相同；機構把 weekly_rest_days 標 soft 時改重罰）
+        # 以 ISO 週（週一～週日）為單位；期間頭尾的不完整週只約束期間內的日子。
         weekly_rest_days = int(constraints.get('weekly_rest_days', 2))
-        max_work_days = max(0, 7 - weekly_rest_days)
         rest_days_soft = 'weekly_rest_days' in soft
         if weekly_rest_days > 0:
+            regular_cap = 6                        # 例假：7 − 1
+            preferred_cap = max(0, 7 - weekly_rest_days)  # 例假＋休息日：預設 5
             for emp in employees:
                 emp_id = emp['id']
+                consents_sixth_day = bool(emp.get('rest_day_work_ok'))
+                hard_cap = regular_cap if consents_sixth_day else preferred_cap
                 for wk, week_idxs in week_groups.items():
-                    if len(week_idxs) <= max_work_days:
+                    if len(week_idxs) <= preferred_cap:
                         continue
                     worked = sum(day_work[emp_id][di] for di in week_idxs)
-                    if rest_days_soft:
-                        over = model.NewIntVar(
-                            0, 7, f'soft_wrest_e{emp_id}_{wk.isoformat()}',
+                    if len(week_idxs) > hard_cap:
+                        if rest_days_soft:
+                            over = model.NewIntVar(
+                                0, 7, f'soft_wrest_e{emp_id}_{wk.isoformat()}',
+                            )
+                            model.Add(worked - hard_cap <= over)
+                            penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
+                        else:
+                            model.Add(worked <= hard_cap)
+                    if consents_sixth_day and preferred_cap < regular_cap:
+                        over6 = model.NewIntVar(
+                            0, 7, f'restday_e{emp_id}_{wk.isoformat()}',
                         )
-                        model.Add(worked - max_work_days <= over)
-                        penalty_terms.append(self.SOFT_LABOR_WEIGHT * over)
-                    else:
-                        model.Add(worked <= max_work_days)
+                        model.Add(worked - preferred_cap <= over6)
+                        penalty_terms.append(self.REST_DAY_WORK_OK_WEIGHT * over6)
 
         # --- 3. minimum rest hours ---
         # Same-day pairs are exempt: a split shift (e.g. 08-12 + 13-17) is a

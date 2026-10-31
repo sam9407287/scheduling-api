@@ -43,6 +43,7 @@ RULE_LABELS_ZH = {
     'weekly_rest_days':           '每七日未足二日休息',
     'min_break_minutes':          '連續工作四小時未安排休息',
     'holiday_scheduling':         '國定假日出勤（工資應加倍）',
+    'holiday_work_refused':       '員工設定不可排國定假日卻被排班',   # 2026-10-31
     'org_closed_day':             '機構公休日排班',
 }
 
@@ -760,8 +761,11 @@ def _check_holidays(
     """§37/§39：國定假日出勤——不違法但工資應加倍，soft 提醒。
 
     假日來源 = 內建台灣國定假日表（tw_holidays.py，含補假日）＋ 機構自訂 Holiday。
+    2026-10-31：員工 availability.holiday_work='forbid'（不可排國定假日）卻被排
+    在假日 → 改回 `holiday_work_refused`，severity hard（設定才不會形同虛設）。
     """
     from .tw_holidays import holiday_names
+    from apps.employees.models import scheduling_prefs_for
     holidays = holiday_names(
         schedule_version.organization,
         schedule_version.period_start, schedule_version.period_end,
@@ -769,20 +773,26 @@ def _check_holidays(
     if not holidays:
         return []
     out: List[Violation] = []
+    prefs_cache: Dict[int, Dict[str, Any]] = {}
     for s in schedules:
         name = holidays.get(s.schedule_date)
         if not name:
             continue
+        emp_pk = s.employee.pk
+        if emp_pk not in prefs_cache:
+            prefs_cache[emp_pk] = scheduling_prefs_for(s.employee)
+        holiday_work = prefs_cache[emp_pk]['holiday_work']
+        refused = holiday_work == 'forbid'
         out.append(Violation(
-            rule='holiday_scheduling',
-            severity='soft',
-            employee_pk=s.employee.pk,
+            rule='holiday_work_refused' if refused else 'holiday_scheduling',
+            severity='hard' if refused else 'soft',
+            employee_pk=emp_pk,
             employee_code=s.employee.employee_id,
             employee_name=_employee_name(s.employee),
             schedule_date=s.schedule_date.isoformat(),
             shift_template_id=s.shift_template_id,
             related_dates=[],
-            detail={'holiday_name': name},
+            detail={'holiday_name': name, 'holiday_work': holiday_work},
         ))
     return out
 

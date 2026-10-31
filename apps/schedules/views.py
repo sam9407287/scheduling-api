@@ -71,7 +71,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         from django.utils.dateparse import parse_date
         from .models import Schedule
         from apps.shifts.models import ShiftTemplate
-        from apps.employees.models import Employee
+        from apps.employees.models import Employee, scheduling_prefs_for
         from apps.ai_engine.providers.base import ScheduleRequest
         from apps.ai_engine.views import get_ai_provider
         from apps.billing.models import (
@@ -166,6 +166,7 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             .filter(
                 pk__in=set(candidates_qs.values_list('pk', flat=True)) | b_emp_ids
             )
+            .select_related('availability')
             .prefetch_related('certifications')
         )
 
@@ -188,6 +189,10 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 'unavailable_dates': leave_dates.get(emp.id, []),
                 'unavailable_intervals': leave_intervals.get(emp.id, {}),
                 'availability': {},
+                # 2026-10-31：合規版也尊重員工休息日同意 / 國定假日 forbid
+                'pay_type': emp.pay_type,
+                'contract_type': emp.contract_type,
+                **scheduling_prefs_for(emp),
             }
             for emp in candidates_qs
         ]
@@ -243,6 +248,15 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 b_version.period_start, b_version.period_end,
                 [sh['id'] for sh in shifts],
             )
+        # 國定假日（2026-10-31）：合規版尊重 holiday_work=forbid（硬擋）與
+        # prefer/avoid；期間排休配額不套 —— 合規版只守法律最低限度、改動最少。
+        if 'holidays' not in labor_law_defaults:
+            from apps.compliance.tw_holidays import holiday_names
+            labor_law_defaults['holidays'] = sorted(
+                d.isoformat() for d in holiday_names(
+                    b_version.organization, b_version.period_start, b_version.period_end)
+            )
+        labor_law_defaults.setdefault('apply_rest_quota', False)
 
         schedule_request = ScheduleRequest(
             organization_id=b_version.organization_id,

@@ -143,7 +143,7 @@ The view maps frontend buttons:
 - **AI gap-fill** → partial seed + minimize_drift_from_seed
 - **Derive A** → full seed + minimize_drift_from_seed + enforce_labor_law
 
-Soft objective weights (high → low): fairness 10, team-constraint soft slack 15-per-unit, max_extra_shifts overcap 20, required-hours under 5 / over 2, employee shift preferences 5–0, preferred time slots 3, drift `drift_weight × time_weight` (default `drift_weight=10`), **shift pattern preference 2** (PR9, tie-breaker only).
+Soft objective weights (high → low): fairness 10, team-constraint soft slack 15-per-unit, max_extra_shifts overcap 20, required-hours under 5 / over 2, employee shift preferences 5–0, preferred time slots 3, drift `drift_weight × time_weight` (default `drift_weight=10`), **shift pattern preference 2** (PR9, tie-breaker only). **2026-10-31**: rest-quota overcap 8/day (monthly pay only), holiday-work penalty prefer 0 / allow 3 / avoid 6 per holiday day (forbid is hard), consenting employee's 6th weekly day 2 (non-consenting stays hard ≤5). Holidays reach the solver via `constraints['holidays']`; `apply_rest_quota=False` turns the quota off (derive-legal does).
 
 For async generation (`run_async: true`), the view delegates to the `generate_schedule_task` Celery task and returns `202 Accepted` with a `task_id`. The task carries a `_billing` side-channel so it records UsageRecord after solving; the cap check still happens synchronously in the view.
 
@@ -247,10 +247,11 @@ Quick reference for "which commit introduced X":
 | `4b9848d` | docs: ARCHITECTURE.md + BUSINESS_FLOWS.md + refreshed CLAUDE.md |
 | `7e73b42` | PR11 (Phase 3): soft vs hard labour-law rule severity + OrgComplianceSettings |
 | `f1933ce` | PR12 (Phase 3): monthly usage threshold alerts (Celery beat, console email) |
+| 2026-10-31 | **Rest-day consent + holiday preference + period rest quota**: `EmployeeAvailability.rest_day_work_ok` / `holiday_work` (forbid/allow/prefer/avoid); solver §36 split into 例假 hard (≤6) + 休息日 (6th day only for consenting employees, soft cost 2); holidays fed to solver/LLM/derive-legal; `apps/ai_engine/rest_quota.py` (monthly-pay work-day cap = days − weekly rest − holidays, soft 8); `GET /api/ai/schedule/rest-quota/`; compliance `holiday_work_refused` hard; `docs/FRONTEND_TODO_2026-10-31.md` |
 | 2026-10-26 | Manager-created/edited attendance recomputes `actual_hours` + anomalies (`AttendanceViewSet._recompute`); staffing-requirement `organization` defaults to the caller's org for superusers too; `manage.py send_test_email` for SMTP verification; `docs/FRONTEND_TODO_2026-10-26.md` (holiday `makeup` = 補假日, not 補班日) |
 | 2026-10-22 | 一例一休 into solver/LLM/compliance (`weekly_rest_days`), **StaffingRequirement** (`apps/shifts/staffing.py`, `/api/shifts/staffing-requirements/`, `coverage` in check-compliance), **email-code self registration** (`apps/accounts/registration.py`, `/api/auth/register/…`, SMTP via env), built-in TW national holidays 2026–2027 (`apps/compliance/tw_holidays.py`, `/api/compliance/holidays/calendar/`) |
 
-Total test count: **504 passing + 1 SQLite-skipped** (2026-10-26).
+Total test count: **534 passing + 1 SQLite-skipped** (2026-10-31).
 
 Phase boundaries: Phase 1 = PR1-5, Phase 2 = PR6-10 + integration tests,
 Phase 3 = PR11-13. Stripe payment + labour-law RAG are deferred to Phase 4

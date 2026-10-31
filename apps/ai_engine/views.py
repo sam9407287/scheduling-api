@@ -167,12 +167,12 @@ class AIEngineViewSet(viewsets.ViewSet):
         period_end = data['period_end']
 
         # 取得員工
-        from apps.employees.models import Employee
+        from apps.employees.models import Employee, scheduling_prefs_for
         from apps.schedules.models import Schedule as ScheduleModel
 
         employees_qs = Employee.objects.filter(
             organization_id=org_id, is_active=True
-        ).prefetch_related('certifications')
+        ).select_related('availability').prefetch_related('certifications')
         if branch_id:
             employees_qs = employees_qs.filter(branch_id=branch_id)
         if data.get('employee_ids'):
@@ -252,6 +252,10 @@ class AIEngineViewSet(viewsets.ViewSet):
                 )),
                 'unavailable_intervals': leave_intervals.get(emp.id, {}),
                 'availability': avail_data,
+                # 2026-10-31：薪制（期間排休配額只套月薪制）＋ 休息日 / 國定假日意願
+                'pay_type': emp.pay_type,
+                'contract_type': emp.contract_type,
+                **scheduling_prefs_for(emp),
                 # Attributes consumed by the team-constraint compiler.
                 # Sensitive fields here are auto-null-gated by EmployeeDataConsent.
                 'attributes': _employee_attributes_for_solver(emp),
@@ -340,6 +344,14 @@ class AIEngineViewSet(viewsets.ViewSet):
             request_constraints['staffing_requirements'] = staffing_plan(
                 load_staffing_rules(org_id, branch_id),
                 period_start, period_end, [sh['id'] for sh in shifts],
+            )
+        # 國定假日（內建台灣假日表＋機構自訂，2026-10-31）：solver 用來套員工
+        # 假日意願（forbid 硬擋 / prefer / avoid）與月薪制期間排休配額。
+        if 'holidays' not in request_constraints:
+            from apps.compliance.tw_holidays import holiday_names
+            request_constraints['holidays'] = sorted(
+                d.isoformat()
+                for d in holiday_names(org_id, period_start, period_end)
             )
 
         schedule_request = ScheduleRequest(
@@ -488,6 +500,75 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         result.metadata = {**(result.metadata or {}), 'billing': billing_metadata}
         return Response(ScheduleResultSerializer(result).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='rest-quota')
+    def rest_quota(self, request):
+        """
+        期間排休試算（免費、不跑 solver、不計費）。2026-10-31。
+
+        GET /api/ai/schedule/rest-quota/?period_start=&period_end=[&branch_id=]
+        前端在使用者選完排班期間後呼叫，顯示「這段期間 N 天、應休 X（週休）
+        ＋ Y（國定假日）天、月薪制最多上 Z 天」，以及每位員工的意願摘要。
+        """
+        from django.utils.dateparse import parse_date
+        from apps.compliance.tw_holidays import holiday_calendar
+        from apps.employees.models import Employee, scheduling_prefs_for
+        from .rest_quota import compute_rest_quota, quota_applies
+
+        start = parse_date(request.query_params.get('period_start') or '')
+        end = parse_date(request.query_params.get('period_end') or '')
+        if not start or not end or end < start:
+            return Response({'error': 'period_start / period_end required (YYYY-MM-DD)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if (end - start).days > 366:
+            return Response({'error': 'period too long (max 366 days)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        org = request.user.organization
+        if request.user.is_superuser and request.query_params.get('organization_id'):
+            from apps.organizations.models import Organization
+            org = Organization.objects.filter(
+                pk=request.query_params['organization_id']).first()
+        if org is None:
+            return Response({'error': 'organization required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        calendar = holiday_calendar(org, start, end)
+        try:
+            weekly_rest_days = int(request.query_params.get('weekly_rest_days', 2))
+        except ValueError:
+            weekly_rest_days = 2
+        quota = compute_rest_quota(start, end, [h['date'] for h in calendar], weekly_rest_days)
+
+        employees_qs = Employee.objects.filter(
+            organization=org, is_active=True,
+        ).select_related('user', 'availability').order_by('employee_id')
+        branch_id = request.query_params.get('branch_id')
+        if branch_id:
+            employees_qs = employees_qs.filter(branch_id=branch_id)
+        rows = []
+        for emp in employees_qs:
+            info = {'id': emp.id, 'pay_type': emp.pay_type, 'contract_type': emp.contract_type}
+            applies = quota_applies(info)
+            rows.append({
+                'employee_id': emp.id,
+                'employee_code': emp.employee_id,
+                'name': ((emp.user.get_full_name() or emp.user.username)
+                         if emp.user_id else emp.employee_id),
+                'pay_type': emp.pay_type,
+                'contract_type': emp.contract_type,
+                'applies': applies,
+                'work_days_max': quota['work_days_max'] if applies else None,
+                **scheduling_prefs_for(emp),
+            })
+        return Response({
+            **quota,
+            'holidays': [
+                {'date': h['date'].isoformat(), 'name': h['name'], 'kind': h['kind']}
+                for h in calendar
+            ],
+            'employees': rows,
+        })
 
     @action(detail=False, methods=['post'])
     def optimize(self, request):
