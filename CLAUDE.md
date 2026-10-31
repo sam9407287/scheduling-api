@@ -97,8 +97,8 @@ All business logic lives under `apps/`:
 | `accounts` | Custom User model, Firebase JWT auth, roles (admin/manager/supervisor/employee) |
 | `organizations` | Organization + Branch hierarchy (all data is org-scoped) |
 | `employees` | Profiles, contracts, certifications, availability/time-slots, **EmployeeTag** (PR1), **EmployeeDataConsent** (PR1), **sensitive attrs** (gender / birth_date / height / weight, PR1) |
-| `shifts` | ShiftTemplate, ShiftRule, ShiftEmployeePriority, **TeamConstraint** (PR1 schema, PR4 compiler, PR6 REST CRUD) |
-| `schedules` | ScheduleVersion (with **`derived_from`** self FK, PR1), Schedule rows, ScheduleChange. Endpoints: `check-compliance/` (PR2), `derive-legal/` (PR3) |
+| `shifts` | ShiftTemplate (type catalogue only since 2026-10-31; headcount lives in the per-version shift plan), ShiftRule, ShiftEmployeePriority, **TeamConstraint** (PR1 schema, PR4 compiler, PR6 REST CRUD), StaffingRequirement (deprecated 2026-10-31) |
+| `schedules` | ScheduleVersion (with **`derived_from`** self FK, PR1), Schedule rows, ScheduleChange, **ScheduleVersionShiftPlan** (2026-10-31: per-day per-shift headcount, the only staffing source; service `shift_plan.py`). Endpoints: `check-compliance/` (PR2), `derive-legal/` (PR3), `shift-plan/` family |
 | `attendance` | Clock-in/out, anomaly detection |
 | `overtime` | OvertimeRecord, OvertimeRule, pay multiplier calculation |
 | `compliance` | **Per-cell `Violation` dataclass** (PR2), `check_schedule_violations()` pure function, ComplianceCheck history, **OrgComplianceSettings** soft/hard rule config (PR11). Endpoint: `/api/compliance/settings/` |
@@ -247,11 +247,12 @@ Quick reference for "which commit introduced X":
 | `4b9848d` | docs: ARCHITECTURE.md + BUSINESS_FLOWS.md + refreshed CLAUDE.md |
 | `7e73b42` | PR11 (Phase 3): soft vs hard labour-law rule severity + OrgComplianceSettings |
 | `f1933ce` | PR12 (Phase 3): monthly usage threshold alerts (Celery beat, console email) |
+| 2026-10-31 (2) | **Per-version daily shift plan** (`ScheduleVersionShiftPlan`, `ScheduleVersion.shift_plan_template`, migration schedules.0007 with one-time backfill from org rules + `min_staff_count`): shift templates no longer carry headcount (API drops `min_staff_count`); the plan is the only headcount source for OR-Tools / LLM / derive-legal / coverage (`constraints['staffing_mode']='explicit'`: unplanned (date, shift) ⇒ not scheduled); no plan ⇒ `400 shift_plan_required`; endpoints `/api/schedules/versions/{id}/shift-plan/` (+ `day/`, `apply-template/`, `copy-from/`), service `apps/schedules/shift_plan.py`; period auto-extension fills new days from the weekday template; `StaffingRequirement` deprecated (endpoints kept, no longer read). `docs/FRONTEND_TODO_2026-10-31_SHIFT_PLAN.md` |
 | 2026-10-31 | **Rest-day consent + holiday preference + period rest quota**: `EmployeeAvailability.rest_day_work_ok` / `holiday_work` (forbid/allow/prefer/avoid); solver §36 split into 例假 hard (≤6) + 休息日 (6th day only for consenting employees, soft cost 2); holidays fed to solver/LLM/derive-legal; `apps/ai_engine/rest_quota.py` (monthly-pay work-day cap = days − weekly rest − holidays, soft 8); `GET /api/ai/schedule/rest-quota/`; compliance `holiday_work_refused` hard; `docs/FRONTEND_TODO_2026-10-31.md` |
 | 2026-10-26 | Manager-created/edited attendance recomputes `actual_hours` + anomalies (`AttendanceViewSet._recompute`); staffing-requirement `organization` defaults to the caller's org for superusers too; `manage.py send_test_email` for SMTP verification; `docs/FRONTEND_TODO_2026-10-26.md` (holiday `makeup` = 補假日, not 補班日) |
 | 2026-10-22 | 一例一休 into solver/LLM/compliance (`weekly_rest_days`), **StaffingRequirement** (`apps/shifts/staffing.py`, `/api/shifts/staffing-requirements/`, `coverage` in check-compliance), **email-code self registration** (`apps/accounts/registration.py`, `/api/auth/register/…`, SMTP via env), built-in TW national holidays 2026–2027 (`apps/compliance/tw_holidays.py`, `/api/compliance/holidays/calendar/`) |
 
-Total test count: **534 passing + 1 SQLite-skipped** (2026-10-31).
+Total test count: **554 passing + 1 SQLite-skipped** (2026-10-31).
 
 Phase boundaries: Phase 1 = PR1-5, Phase 2 = PR6-10 + integration tests,
 Phase 3 = PR11-13. Stripe payment + labour-law RAG are deferred to Phase 4

@@ -73,6 +73,11 @@ class ScheduleVersion(models.Model):
         verbose_name='派生來源版本',
         help_text='A 班表（legal）通常派生自 B 班表（actual）；保留歷史可重新派生'
     )
+    # 2026-10-31 每日班別計畫的「星期範本」：{"0": [{shift_template, min_staff, max_staff}], …}
+    # 0=週一…6=週日。apply-template 存入；期間自動延長時用它補新長出來的日子。
+    shift_plan_template = models.JSONField(
+        default=dict, blank=True, verbose_name='每日班別計畫星期範本',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -280,3 +285,46 @@ class ScheduleOverlapDecision(models.Model):
 
     def __str__(self):
         return f"{self.conflict_key[:8]} {self.get_decision_display()}"
+
+
+class ScheduleVersionShiftPlan(models.Model):
+    """
+    每張班表自己的每日班別計畫（2026-10-31，前端 Frank 提案）。
+
+    一列 = 「這張班表、這一天、這個班別、需要幾人（可選上限）」。
+    這是 AI 排班、合規 coverage 唯一的人數來源：
+      * 某天沒有任何列 ⇒ 那天不開班、AI 不排、coverage 不檢查
+      * 某天只列早班＋晚班 ⇒ 那天只有這兩個班
+      * ShiftTemplate 不再帶人數（min_staff_count 欄位保留但 API 不再使用）
+      * 機構層級 StaffingRequirement 由本表取代（只剩回填舊版本時用過一次）
+    版本沒有任何計畫列時，AI 排班回 400 `shift_plan_required`，不會默默排出空表。
+    """
+    schedule_version = models.ForeignKey(
+        ScheduleVersion,
+        on_delete=models.CASCADE,
+        related_name='shift_plan',
+        verbose_name='排班版本',
+    )
+    date = models.DateField(verbose_name='日期')
+    shift_template = models.ForeignKey(
+        'shifts.ShiftTemplate',
+        on_delete=models.CASCADE,
+        related_name='version_plans',
+        verbose_name='班別',
+    )
+    min_staff = models.PositiveIntegerField(default=1, verbose_name='需要人數（最少）')
+    max_staff = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name='人數上限（null = 不限）',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '每日班別計畫'
+        verbose_name_plural = '每日班別計畫'
+        unique_together = [['schedule_version', 'date', 'shift_template']]
+        ordering = ['date', 'shift_template__start_time', 'shift_template_id']
+
+    def __str__(self):
+        cap = f'–{self.max_staff}' if self.max_staff is not None else ''
+        return f'{self.schedule_version_id} {self.date} {self.shift_template_id} {self.min_staff}{cap} 人'

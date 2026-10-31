@@ -15,6 +15,7 @@ from rest_framework.test import APIClient
 from apps.employees.models import Employee
 from apps.schedules.models import Schedule, ScheduleVersion
 from apps.shifts.models import ShiftTemplate
+from conftest import plan_all_shifts
 
 pytestmark = pytest.mark.django_db
 
@@ -65,6 +66,7 @@ def _mock_llm(monkeypatch, assignments):
 class TestLLMGenerate:
     def test_valid_rows_persist_to_roster(self, admin_api_client, employee, shift,
                                           version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
             {'employee_id': employee.pk, 'date': '2026-10-02', 'shift_id': shift.pk},
@@ -81,6 +83,7 @@ class TestLLMGenerate:
 
     def test_hallucinated_rows_rejected(self, admin_api_client, employee, shift,
                                         version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
             {'employee_id': 99999, 'date': '2026-10-01', 'shift_id': shift.pk},   # 幽靈員工
@@ -103,6 +106,7 @@ class TestLLMGenerate:
             end_time='16:00', break_minutes=60, min_staff_count=1,
         )
         guarded.required_certifications.add(cert)
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源（含專業班）
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': guarded.pk},
         ])
@@ -114,6 +118,7 @@ class TestLLMGenerate:
 
     def test_leave_day_guard(self, admin_api_client, employee, shift, version,
                              organization, admin_user, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         from apps.leaves.models import LeaveRequest
         LeaveRequest.objects.create(
             organization=organization, employee=employee, leave_type='personal',
@@ -131,6 +136,7 @@ class TestLLMGenerate:
 
     def test_approved_version_locked(self, admin_api_client, employee, shift,
                                      version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         ScheduleVersion.objects.filter(pk=version.pk).update(status='approved')
         response = admin_api_client.post(URL, {
             'schedule_version': version.pk, 'consume_token': False,
@@ -140,6 +146,7 @@ class TestLLMGenerate:
 
     def test_missing_api_key_503(self, admin_api_client, employee, shift,
                                  version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         for key in ('LLM_API_KEY', 'GEMINI_API_KEY'):
             monkeypatch.delenv(key, raising=False)
         response = admin_api_client.post(URL, {
@@ -150,6 +157,7 @@ class TestLLMGenerate:
 
     def test_billing_charged_as_generate(self, admin_api_client, employee, shift,
                                          version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
         ])
@@ -162,6 +170,7 @@ class TestLLMGenerate:
 
     def test_coverage_warning_reported(self, admin_api_client, employee, shift,
                                        version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [])  # 模型什麼都沒排
         response = admin_api_client.post(URL, {
             'schedule_version': version.pk, 'consume_token': False,
@@ -191,6 +200,7 @@ class TestScopeAndGuards:
             organization=organization, branch=branch, version_label='分店版',
             version_type='actual', period_start=date(2026, 10, 1),
             period_end=date(2026, 10, 7), created_by=admin_api_client.handler._force_user)
+        plan_all_shifts(version)
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
         ])
@@ -205,6 +215,7 @@ class TestScopeAndGuards:
 
     def test_in_scope_employee_with_no_rows_is_flagged(
             self, admin_api_client, employee, shift, version, organization, branch, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         idle = self._second_employee(organization, branch)
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
@@ -219,6 +230,7 @@ class TestScopeAndGuards:
 
     def test_seventh_consecutive_day_dropped(
             self, admin_api_client, employee, shift, version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         rows = [{'employee_id': employee.pk, 'date': f'2026-10-0{d}', 'shift_id': shift.pk}
                 for d in range(1, 8)]  # 10-01 .. 10-07, seven days straight
         _mock_llm(monkeypatch, rows)
@@ -234,6 +246,7 @@ class TestScopeAndGuards:
 
     def test_existing_rows_count_toward_consecutive_days(
             self, admin_api_client, employee, shift, version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         for d in range(1, 7):  # 6 days already in the version
             Schedule.objects.create(
                 schedule_version=version, employee=employee, shift_template=shift,
@@ -260,6 +273,7 @@ class TestSameDayOption:
 
     def test_default_keeps_one_shift_per_day(self, admin_api_client, employee, shift,
                                              evening_shift, version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': evening_shift.pk},
@@ -275,6 +289,7 @@ class TestSameDayOption:
 
     def test_existing_row_blocks_second_shift_when_disallowed(
             self, admin_api_client, employee, shift, evening_shift, version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         Schedule.objects.create(
             schedule_version=version, employee=employee, shift_template=shift,
             schedule_date=date(2026, 10, 1), expected_hours=Decimal('7.00'),
@@ -290,6 +305,7 @@ class TestSameDayOption:
 
     def test_allow_multiple_shifts_per_day(self, admin_api_client, employee, shift,
                                            evening_shift, version, monkeypatch):
+        plan_all_shifts(version)  # 2026-10-31 每日班別計畫為人數來源
         _mock_llm(monkeypatch, [
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': shift.pk},
             {'employee_id': employee.pk, 'date': '2026-10-01', 'shift_id': evening_shift.pk},

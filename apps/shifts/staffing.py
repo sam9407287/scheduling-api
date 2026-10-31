@@ -112,6 +112,29 @@ def plan_index(plan: Iterable[Dict[str, Any]]) -> Dict[tuple, Dict[str, Any]]:
     return {(p['date'], p.get('shift_id')): p for p in plan}
 
 
+def version_shift_plan(version) -> Optional[List[Dict[str, Any]]]:
+    """每張班表自己的每日班別計畫（2026-10-31，ScheduleVersionShiftPlan）→
+    staffing plan rows。版本沒有任何計畫列回 None（呼叫端決定 400 或走舊路）。
+
+    有計畫時語意是 explicit：沒列到的 (日期, 班別) = 那天不開那個班。
+    呼叫端要同時設 constraints['staffing_mode'] = 'explicit'。
+    """
+    from apps.schedules.models import ScheduleVersionShiftPlan
+    version_id = getattr(version, 'pk', version)
+    rows = list(
+        ScheduleVersionShiftPlan.objects.filter(schedule_version_id=version_id)
+        .values('date', 'shift_template_id', 'min_staff', 'max_staff')
+        .order_by('date', 'shift_template_id')
+    )
+    if not rows:
+        return None
+    return [
+        {'date': r['date'].isoformat(), 'shift_id': r['shift_template_id'],
+         'min_staff': int(r['min_staff']), 'max_staff': r['max_staff']}
+        for r in rows
+    ]
+
+
 def coverage_report(
     *,
     period_start: date,
@@ -120,6 +143,7 @@ def coverage_report(
     assignments: Iterable[Dict[str, Any]],
     plan: Iterable[Dict[str, Any]],
     closed_weekdays: Iterable[int] = (),
+    explicit: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Per (date, shift) and per day-total: required vs assigned headcount.
@@ -128,6 +152,10 @@ def coverage_report(
     Day-total rows appear only when a day-level rule exists for that date.
     Closed weekdays are skipped (nobody should be there, so no "shortage").
     status: ok | under | over
+
+    `explicit=True`（2026-10-31 版本每日班別計畫）：只有計畫列到的 (日期, 班別)
+    才算「需要」（source="plan"）；沒列到卻有人被排的格子以 required 0/0、
+    status "over"、source "unplanned" 回報，完全沒人的就不出現。
     """
     idx = plan_index(plan)
     closed = set(closed_weekdays or ())
@@ -147,16 +175,30 @@ def coverage_report(
             continue
         for s in shifts:
             req = idx.get((day_iso, s['id']))
-            min_staff = req['min_staff'] if req else int(s.get('min_staff_count') or 0)
-            max_staff = req['max_staff'] if req else None
             got = per_shift.get((day_iso, s['id']), 0)
+            if explicit:
+                if req is None:
+                    if got == 0:
+                        continue  # 那天沒開這個班、也沒人 → 不是缺口
+                    rows.append({
+                        'date': day_iso, 'shift_template_id': s['id'],
+                        'shift_name': s.get('name'),
+                        'required_min': 0, 'required_max': 0,
+                        'assigned': got, 'status': 'over', 'source': 'unplanned',
+                    })
+                    continue
+                min_staff, max_staff, source = req['min_staff'], req['max_staff'], 'plan'
+            else:
+                min_staff = req['min_staff'] if req else int(s.get('min_staff_count') or 0)
+                max_staff = req['max_staff'] if req else None
+                source = 'rule' if req else 'template'
             rows.append({
                 'date': day_iso, 'shift_template_id': s['id'],
                 'shift_name': s.get('name'),
                 'required_min': min_staff, 'required_max': max_staff,
                 'assigned': got,
                 'status': _status(got, min_staff, max_staff),
-                'source': 'rule' if req else 'template',
+                'source': source,
             })
         req = idx.get((day_iso, None))
         if req:

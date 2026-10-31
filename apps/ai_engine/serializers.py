@@ -36,6 +36,10 @@ class ScheduleRequestSerializer(serializers.Serializer):
     # async 是 Python 關鍵字，以 run_async 作為欄位名稱；前端傳 "run_async": true
     run_async = serializers.BooleanField(default=False)
 
+    # --- 2026-10-31：每日班別計畫來源版本（人數由該版本的計畫決定）---
+    # 沒傳時用 seed_version_id 的版本；兩者都沒有才走舊的機構規則/模板人數路徑。
+    schedule_version_id = serializers.IntegerField(required=False, allow_null=True)
+
     # --- 新增：seed / drift mode ---
     seed_version_id = serializers.IntegerField(required=False, allow_null=True)
     minimize_drift_from_seed = serializers.BooleanField(default=False)

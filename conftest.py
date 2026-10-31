@@ -171,3 +171,27 @@ def employee_api_client(api_client, employee_user):
     """Create authenticated employee API client"""
     api_client.force_authenticate(user=employee_user)
     return api_client
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-31 每日班別計畫：測試共用 helper（AI 排班人數只來自版本計畫，沒有會 400）
+# ---------------------------------------------------------------------------
+from datetime import timedelta as _timedelta
+
+
+def plan_all_shifts(version, min_staff=1, shifts=None, start=None, end=None):
+    from apps.schedules.models import ScheduleVersionShiftPlan
+    from apps.shifts.models import ShiftTemplate
+    if shifts is None:
+        shifts = list(ShiftTemplate.objects.filter(
+            organization=version.organization, is_active=True))
+    start = start or version.period_start
+    end = end or version.period_end
+    rows, day = [], start
+    while day <= end:
+        for s in shifts:
+            rows.append(ScheduleVersionShiftPlan(
+                schedule_version=version, date=day, shift_template=s, min_staff=min_staff))
+        day += _timedelta(days=1)
+    ScheduleVersionShiftPlan.objects.bulk_create(rows, ignore_conflicts=True)
+    return rows

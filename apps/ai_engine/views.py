@@ -319,6 +319,35 @@ class AIEngineViewSet(viewsets.ViewSet):
 
         team_constraints = _load_team_constraints(org_id, branch_id)
 
+        # ---- 每日班別計畫（2026-10-31）：版本層級的「哪些班、各幾人」 ----
+        # schedule_version_id 有計畫 → explicit 模式：沒列到的 (日期, 班別) 不排；
+        # 該版本沒有任何計畫列 → 400，不默默排出空表。只給 seed_version_id 時
+        # 沿用 seed 版本的計畫（有才用，沒有走舊的機構規則路徑，相容既有呼叫）。
+        version_plan = None
+        explicit_version_id = data.get('schedule_version_id')
+        plan_version_id = explicit_version_id or seed_version_id
+        if plan_version_id:
+            from apps.schedules.models import ScheduleVersion as _SV
+            from apps.shifts.staffing import version_shift_plan
+            plan_version = _SV.objects.filter(pk=plan_version_id).first()
+            if plan_version is None:
+                return Response({'error': f'schedule_version_id {plan_version_id} not found'},
+                                status=status.HTTP_404_NOT_FOUND)
+            if (not request.user.is_superuser
+                    and plan_version.organization_id != org_id):
+                return Response({'error': 'schedule version belongs to a different organization'},
+                                status=status.HTTP_403_FORBIDDEN)
+            version_plan = version_shift_plan(plan_version)
+            if not version_plan and explicit_version_id:
+                return Response({
+                    'code': 'shift_plan_required',
+                    'error': '請先設定這張班表的每日班別（哪些班、各需要幾人）',
+                    'schedule_version_id': plan_version.pk,
+                }, status=status.HTTP_400_BAD_REQUEST)
+            if version_plan and not data.get('shift_template_ids'):
+                planned = {r['shift_id'] for r in version_plan}
+                shifts = [sh for sh in shifts if sh['id'] in planned]
+
         # 優先序：solver 預設 8 < org ShiftRule < request constraints
         from apps.shifts.rules import resolve_max_daily_hours
         request_constraints = dict(data.get('constraints') or {})
@@ -338,13 +367,17 @@ class AIEngineViewSet(viewsets.ViewSet):
             request_constraints['closed_weekdays'] = (
                 cfg.weekly_closed_days if cfg else []
             )
-        # 每日人力需求規則（「每天需要幾個人」）：依日期/星期覆蓋 min_staff、加上限
+        # 人數來源：版本每日班別計畫（explicit）> 呼叫方自帶 > 舊的機構規則/模板人數
         if 'staffing_requirements' not in request_constraints:
-            from apps.shifts.staffing import load_staffing_rules, staffing_plan
-            request_constraints['staffing_requirements'] = staffing_plan(
-                load_staffing_rules(org_id, branch_id),
-                period_start, period_end, [sh['id'] for sh in shifts],
-            )
+            if version_plan:
+                request_constraints['staffing_requirements'] = version_plan
+                request_constraints['staffing_mode'] = 'explicit'
+            else:
+                from apps.shifts.staffing import load_staffing_rules, staffing_plan
+                request_constraints['staffing_requirements'] = staffing_plan(
+                    load_staffing_rules(org_id, branch_id),
+                    period_start, period_end, [sh['id'] for sh in shifts],
+                )
         # 國定假日（內建台灣假日表＋機構自訂，2026-10-31）：solver 用來套員工
         # 假日意願（forbid 硬擋 / prefer / avoid）與月薪制期間排休配額。
         if 'holidays' not in request_constraints:
@@ -774,6 +807,19 @@ class LLMScheduleViewSet(viewsets.ViewSet):
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
 
         context, lookups = llm_scheduler.build_context(version, period_start, period_end)
+        if not lookups.get('explicit'):
+            # 2026-10-31：人數只來自這張班表的每日班別計畫，沒有就不排
+            return Response({
+                'code': 'shift_plan_required',
+                'error': '請先設定這張班表的每日班別（哪些班、各需要幾人）',
+                'schedule_version_id': version.pk,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not context['staffing_requirements']:
+            return Response({
+                'code': 'shift_plan_required',
+                'error': '這段期間沒有任何每日班別計畫（計畫日期不在所選期間內）',
+                'schedule_version_id': version.pk,
+            }, status=status.HTTP_400_BAD_REQUEST)
         if not context['employees'] or not context['shifts']:
             return Response({'error': '此機構沒有可排班的員工或班別'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -827,13 +873,16 @@ class LLMScheduleViewSet(viewsets.ViewSet):
                 'date': row['date'],
                 'shift_id': row['shift'].pk,
             })
-        # 版本期間只擴不縮（與手動排班一致）
+        # 版本期間只擴不縮（與手動排班一致）；長出來的日子用星期範本補計畫
         if created:
+            from datetime import date as _date
+            from apps.schedules.shift_plan import fill_from_template
             dates = sorted(r['date'] for r in created)
             ScheduleVersion.objects.filter(
                 pk=version.pk, period_start__gt=dates[0]).update(period_start=dates[0])
             ScheduleVersion.objects.filter(
                 pk=version.pk, period_end__lt=dates[-1]).update(period_end=dates[-1])
+            fill_from_template(version, _date.fromisoformat(dates[0]), _date.fromisoformat(dates[-1]))
 
         billing_info = None
         if consume_token:

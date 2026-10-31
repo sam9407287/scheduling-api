@@ -529,10 +529,13 @@ class ORToolsProvider(BaseScheduleProvider):
         # 1. 每個班別每天至少需要 min_staff_count 人（公休日除外）。
         #    每日人力需求規則（StaffingRequirement，「每天需要幾個人」）可依
         #    日期/星期覆蓋最少人數並加上限；shift_id=None 的規則是當日總人數。
+        #    2026-10-31 staffing_mode='explicit'（版本每日班別計畫）：沒列到的
+        #    (日期, 班別) = 那天不開那個班 → 人數硬性為 0，不再回退 min_staff_count。
         staffing = {
             (req['date'], req.get('shift_id')): req
             for req in (constraints.get('staffing_requirements') or [])
         }
+        explicit_plan = constraints.get('staffing_mode') == 'explicit'
         day_level_needed = any(sid is None for (_, sid) in staffing)
         day_work = (self._day_work_vars(model, assignments, employees, shifts, num_days)
                     if day_level_needed else None)
@@ -543,9 +546,12 @@ class ORToolsProvider(BaseScheduleProvider):
             for shift in shifts:
                 shift_id = shift['id']
                 req = staffing.get((day_iso, shift_id))
+                headcount = sum(assignments[emp['id']][day_idx][shift_id] for emp in employees)
+                if req is None and explicit_plan:
+                    model.Add(headcount == 0)   # 計畫沒開這個班
+                    continue
                 min_staff = (int(req['min_staff']) if req is not None
                              else shift.get('min_staff_count', 1))
-                headcount = sum(assignments[emp['id']][day_idx][shift_id] for emp in employees)
                 model.Add(headcount >= min_staff)
                 if req is not None and req.get('max_staff') is not None:
                     model.Add(headcount <= int(req['max_staff']))

@@ -696,16 +696,24 @@ def coverage_for_version(schedule_version: ScheduleVersion) -> List[Dict[str, An
     cfg = OrgComplianceSettings.objects.filter(
         organization=schedule_version.organization,
     ).first()
-    plan = staffing_plan(
-        load_staffing_rules(schedule_version.organization_id, schedule_version.branch_id),
-        schedule_version.period_start, schedule_version.period_end,
-        [sh['id'] for sh in shifts],
-    )
+    # 2026-10-31：版本有每日班別計畫 → 只檢查計畫列到的 (日期, 班別)（explicit）；
+    # 沒有計畫的舊版本沿用機構規則 / 模板人數。
+    from apps.shifts.staffing import version_shift_plan
+    version_plan = version_shift_plan(schedule_version)
+    if version_plan:
+        plan, explicit = version_plan, True
+    else:
+        plan, explicit = staffing_plan(
+            load_staffing_rules(schedule_version.organization_id, schedule_version.branch_id),
+            schedule_version.period_start, schedule_version.period_end,
+            [sh['id'] for sh in shifts],
+        ), False
     return coverage_report(
         period_start=schedule_version.period_start,
         period_end=schedule_version.period_end,
         shifts=shifts, assignments=assignments, plan=plan,
         closed_weekdays=(cfg.weekly_closed_days if cfg else []),
+        explicit=explicit,
     )
 
 

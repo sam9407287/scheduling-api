@@ -5,7 +5,7 @@
 - REST CRUD：/api/shifts/staffing-requirements/、機構隔離、date/weekday 擇一、max ≥ min
 - OR-Tools：星期規則覆蓋 min_staff、max_staff 硬上限、全日總人數規則
 - 一鍵合規檢查回 coverage（需要 vs 已排）
-- LLM：缺口警告用規則人數；超過 max_staff 的列被驗證層丟掉
+- LLM：缺口警告用版本每日班別計畫人數（2026-10-31 起）；超過 max_staff 的列被驗證層丟掉
 """
 from datetime import date, time, timedelta
 from decimal import Decimal
@@ -319,10 +319,11 @@ class TestLLMPath:
         e1 = _employee(organization, branch, employee_role, 'L1')
         _employee(organization, branch, employee_role, 'L2')
         shift = _shift(organization, min_staff=1)
-        StaffingRequirement.objects.create(
-            organization=organization, shift_template=shift, date=MON, min_staff=2,
-        )
         version = _version(organization, branch, admin_user, start=MON, end=MON)
+        # 2026-10-31：LLM 的人數只來自版本每日班別計畫（機構規則不再進 LLM）
+        from apps.schedules.models import ScheduleVersionShiftPlan
+        ScheduleVersionShiftPlan.objects.create(
+            schedule_version=version, date=MON, shift_template=shift, min_staff=2)
         captured = {}
         from apps.ai_engine import llm_provider
 
@@ -344,10 +345,10 @@ class TestLLMPath:
         e1 = _employee(organization, branch, employee_role, 'M1')
         e2 = _employee(organization, branch, employee_role, 'M2')
         shift = _shift(organization, min_staff=1)
-        StaffingRequirement.objects.create(
-            organization=organization, shift_template=shift, min_staff=1, max_staff=1,
-        )
         version = _version(organization, branch, admin_user, start=MON, end=MON)
+        from apps.schedules.models import ScheduleVersionShiftPlan
+        ScheduleVersionShiftPlan.objects.create(
+            schedule_version=version, date=MON, shift_template=shift, min_staff=1, max_staff=1)
         self._mock(monkeypatch, [
             {'employee_id': e1.pk, 'date': MON.isoformat(), 'shift_id': shift.pk},
             {'employee_id': e2.pk, 'date': MON.isoformat(), 'shift_id': shift.pk},

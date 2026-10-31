@@ -277,17 +277,17 @@ GET/PUT   /api/shifts/templates/{id}/employee_priorities/   // GET list, PUT bul
 GET/POST  /api/shifts/rules/
 GET/POST  /api/shifts/team-constraints/        // manager
 GET/PUT/PATCH/DELETE /api/shifts/team-constraints/{id}/
-GET/POST  /api/shifts/staffing-requirements/   // manager（2026-10-22 每日人力需求）
+GET/POST  /api/shifts/staffing-requirements/   // manager（2026-10-22）— **2026-10-31 起棄用**，見 §3.2
 GET/PUT/PATCH/DELETE /api/shifts/staffing-requirements/{id}/
 ```
 
-Shift template body:
+Shift template body（**2026-10-31：班別只是型錄，不再帶人數**。`min_staff_count` 已從
+回應移除、送了會被忽略；每天開哪些班、各幾人改在每張班表的每日班別計畫 §4.6）：
 ```jsonc
 {
   "organization": 1, "name": "夜班",
   "start_time": "22:00", "end_time": "06:00",
   "break_minutes": 30, "overlap_minutes": 30,
-  "min_staff_count": 2,
   "certification_ids": [5, 7]      // write-only; required certs
 }
 // response also includes read-only "duration_hours"
@@ -312,7 +312,12 @@ POST /api/shifts/rules/
 An active `max_daily_hours` rule feeds the AI solver's daily-hours cap
 (precedence: solver default 8h < org rule < request `constraints`).
 
-### 3.2 每日人力需求（「每天需要幾個人」，2026-10-22，PM 10/13 回饋）
+### 3.2 每日人力需求（2026-10-22）— **已被 §4.6 每日班別計畫取代（2026-10-31）**
+
+端點仍在、資料仍可讀寫，但 **AI 排班、派生合規版、合規 coverage 都不再讀它**
+（有每日班別計畫的版本一律以計畫為準；生產既有版本已由 migration 一次性把規則
+展開進各自的計畫）。前端的「每日人力需求」設定頁請下線或改導向 §4.6。
+以下保留作歷史參考：
 
 `ShiftTemplate.min_staff_count` 是「每天都一樣」的最低人數；這張表讓人數
 **依星期幾或特定日期不同**，並可設上限。沒有規則命中的 (日期, 班別) 仍用
@@ -389,6 +394,10 @@ GET       /api/schedules/versions/{id}/compare/?version2_id=<id>
 POST      /api/schedules/versions/{id}/create_dual_versions/
 POST      /api/schedules/versions/{id}/check-compliance/      // see §4.1
 POST      /api/schedules/versions/{B_id}/derive-legal/        // see §4.2
+GET/PUT   /api/schedules/versions/{id}/shift-plan/            // see §4.6（2026-10-31 每日班別計畫）
+PUT       /api/schedules/versions/{id}/shift-plan/day/
+POST      /api/schedules/versions/{id}/shift-plan/apply-template/
+POST      /api/schedules/versions/{id}/shift-plan/copy-from/
 
 GET       /api/schedules/versions/approved-timeline/           // see §4.4
 GET/POST  /api/schedules/overlap-decisions/                    // see §4.4
@@ -484,6 +493,11 @@ POST /api/schedules/versions/{id}/check-compliance/
 ```
 Render each violation on the cell keyed by `(employee_pk, schedule_date, shift_template_id)`.
 Render `coverage` on the day/shift header（例：「1/2」紅字），not on employee cells.
+
+**2026-10-31 起 `coverage` 以每日班別計畫（§4.6）為準**：只回計畫列到的 (日期, 班別)
+（`source: "plan"`）；計畫沒開卻有人被排的格子回 `required_min: 0, required_max: 0,
+status: "over", source: "unplanned"`（提示「這天沒開這個班」）；沒開也沒人的格子不出現。
+沒有計畫的舊版本才會看到 `source: "rule" | "template"`。
 
 **一例一休（§36，2026-10-22 進規則）** — `weekly_rest_days`：每 ISO 週（週一～週日）
 應休 2 天。`detail.rest_days` 0 ⇒ `severity: "hard"`（例假日出勤，紅）、1 ⇒ `"soft"`
@@ -646,6 +660,47 @@ schedule so the manager sees that day's entries in other rosters.
 
 ---
 
+### 4.6 每日班別計畫（這張班表每天開哪些班、各幾人）  (`supervisor`)  — 2026-10-31
+
+**唯一的人數來源。** 班別模板只是型錄（§3）；開班表時才決定每一天要開哪些班、各需要幾人。
+某天沒有任何計畫列 = 那天不開班，AI 不排、coverage 不檢查。版本沒有任何計畫列就按 AI 排班
+→ `400 shift_plan_required`（§5、§5.1）。計畫日期超出版本期間時，期間**只擴不縮**（跟班次寫入一致）。
+已簽核版本（非 draft）寫入回 `409 schedule_version_locked`。詳細 UI 流程見 `docs/FRONTEND_TODO_2026-10-31_SHIFT_PLAN.md`。
+
+```jsonc
+GET /api/schedules/versions/{id}/shift-plan/
+// 200
+{ "schedule_version": 42, "period_start": "2026-11-02", "period_end": "2026-11-29",
+  "template": { "0": [ { "shift_template_id": 4, "min_staff": 2, "max_staff": null } ],   // 星期範本（0=週一…6=週日），apply-template 存的
+                "5": [ { "shift_template_id": 4, "min_staff": 1, "max_staff": null },
+                       { "shift_template_id": 5, "min_staff": 1, "max_staff": 1 } ] },
+  "rows": [ { "date": "2026-11-02", "shift_template": 4, "shift_name": "早班", "min_staff": 2, "max_staff": null }, … ],
+  "summary": { "rows": 40, "days_planned": 28, "days_in_period": 28, "days_without_plan": 0 } }
+
+PUT /api/schedules/versions/{id}/shift-plan/                 // 整張覆寫
+{ "rows": [ { "date": "2026-11-02", "shift_template": 4, "min_staff": 2, "max_staff": null }, … ] }
+
+PUT /api/schedules/versions/{id}/shift-plan/day/             // 覆寫某一天（日曆上逐日調整）
+{ "date": "2026-11-03", "shifts": [ { "shift_template": 4, "min_staff": 1 }, { "shift_template": 5, "min_staff": 1, "max_staff": 2 } ] }
+// "shifts": [] = 那天不開班
+
+POST /api/schedules/versions/{id}/shift-plan/apply-template/ // 星期範本展開（開新班表的主要路徑）
+{ "template": { "0": [ { "shift_template": 4, "min_staff": 2 } ], "1": [...], … , "6": [...] },
+  "period_start": "2026-11-02", "period_end": "2026-11-29",   // 省略 = 版本目前期間
+  "overwrite": false }                                        // false：已有計畫的日子不動；true：期間內全部重來
+// 範本會存在版本上；之後手動排班 / AI 排班把期間撐大時，新長出來的日子自動用範本補列
+
+POST /api/schedules/versions/{id}/shift-plan/copy-from/      // 複製另一張班表
+{ "source_version_id": 41, "period_start": "2026-12-01", "period_end": "2026-12-31", "overwrite": false }
+// 用來源的範本；來源沒存範本就從它的計畫列推（每個星期幾取第一個有計畫的日子）
+
+// 以上寫入都回 GET 同樣的 payload。
+// 400：班別不屬於本機構 / max_staff < min_staff / 日期格式 / 星期鍵不在 0–6 / 來源沒有任何計畫
+// 404：source_version_id 不存在；409：版本已簽核
+```
+
+---
+
 ## 5. AI scheduling  (`manager`, charges tokens)
 
 One endpoint, three modes by parameter combination.
@@ -655,8 +710,9 @@ POST /api/ai/schedule/generate/
 {
   "organization_id": 1, "branch_id": 3,
   "period_start": "2026-06-01", "period_end": "2026-06-30",
+  "schedule_version_id": 42,       // 2026-10-31：人數來源 = 這張班表的每日班別計畫（§4.6）。前端一律要傳；沒計畫 → 400 shift_plan_required
   "employee_ids": [12, 17],        // optional, default = all active
-  "shift_template_ids": [4, 5],    // optional, default = all active
+  "shift_template_ids": [4, 5],    // optional, default = 計畫裡開到的班別（沒傳 schedule_version_id 才是 all active）
   "constraints": {}, "preferences": {},
   "enforce_labor_law": false,      // true = labour law as hard constraints（週工時、連續天數、間隔、日工時、一例一休：未同意休息日者 ≤5 天、同意者 ≤6 天、例假誰都不行）
   "soft_rule_types": [],           // optional per-call soft labour rules
@@ -702,12 +758,14 @@ POST /api/ai/schedule/generate/
 // 402 → { "error": "monthly billing cap exceeded", "tokens_required": 10,
 //         "current_period_tokens": 95, "projected_period_tokens": 105, "monthly_cap_tokens": 100 }
 // 400 → minimize_drift_from_seed without seed_version_id
+// 400 → { "code": "shift_plan_required", "error": "請先設定這張班表的每日班別（哪些班、各需要幾人）", "schedule_version_id": 42 }
+//        （schedule_version_id 指向的版本沒有任何每日班別計畫；只給 seed_version_id 時沿用 seed 版本的計畫、沒有則走舊路徑）
 ```
 `success:false` with a `violations` array means the solver could not find a
 schedule (still billed — pre-debit). Show the message.
 
-AI 排班自動帶入（不用前端傳）：機構公休日、每日人力需求、**國定假日**（內建表＋機構自訂）、
-每位員工的 `rest_day_work_ok` / `holiday_work` / `pay_type`。行為：
+AI 排班自動帶入（不用前端傳）：機構公休日、**每日班別計畫（§4.6，人數唯一來源；沒列到的日期/班別不排）**、
+**國定假日**（內建表＋機構自訂）、每位員工的 `rest_day_work_ok` / `holiday_work` / `pay_type`。行為：
 
 - **一例一休**：每週 ≤ 5 天；`rest_day_work_ok: true` 的員工人力不足時可上第 6 天（休息日），
   第 7 天（例假）誰都不行。先用願意的人，再用不願意的人（後者等於硬約束，排不出就 `success:false`）。
@@ -771,6 +829,7 @@ POST /api/ai/schedule/llm-generate/
   "billing": { "billing_mode": "generate", "tokens_charged": 10 } }
 
 // 409 schedule_version_locked — 已簽核版本，先取消簽核
+// 400 shift_plan_required — 這張班表（或所選期間）沒有任何每日班別計畫（§4.6）；前端在按鈕前就該擋、導去設定計畫
 // 503 llm_not_configured — 後端未設模型 API key（找 Sam）
 // 502 llm_call_failed — 主模型＋所有備援模型都失敗（後端已自動重試＋換模型），可稍後再按
 // 402 — 月度 token 額度已滿
@@ -784,7 +843,7 @@ POST /api/ai/schedule/llm-generate/
 - **七休一**：模型輸出若讓某人連續工作超過 6 天，第 7 天起的班次會進 `rejected`（reason 含「七休一」），版本內既有班次也算進連續天數。
 - **一例一休（2026-10-22；2026-10-31 加休息日同意）**：prompt 要求每人每週（週一～週日）最多上 5 天；`rest_day_work_ok: true` 的員工可到 6 天。模型還是多排時，超過的班次進 `rejected`（reason 含「一例一休」＋「員工未同意休息日出勤」或「例假不得出勤」），版本內既有班次也算。
 - **國定假日意願（2026-10-31）**：假日表、每人 `holiday_work` / `rest_day_work_ok` / 月薪制 `work_days_max` 都進 prompt；`forbid` 的員工被模型排在假日時進 `rejected`（reason「該員工設定不可排國定假日」）。prefer / avoid / 排休配額只是 prompt 指示，不在驗證層硬擋。
-- **每日人力需求（2026-10-22，§3.2）**：規則人數進 prompt；超過 `max_staff` 的列進 `rejected`（reason 含「人數上限」）；缺口 `warnings` 以規則人數為準。
+- **每日班別計畫（2026-10-31，§4.6；取代 §3.2）**：計畫進 prompt、模型只看到計畫開到的班別；模型排到計畫沒開的 (日期, 班別) 進 `rejected`（reason「2026-11-03 的每日班別計畫沒有開 早班」）；超過 `max_staff` 的列進 `rejected`（reason 含「人數上限」）；缺口 `warnings` 只看計畫列到的格子。
 - **耗時**：正常 30–60 秒；主模型過載自動退避重試並切換備援模型時後端有 150 秒總預算上限，按鈕請保持 loading、不要設 axios timeout。
 - 模型輸出**逐筆驗證**（員工/班別存在、日期在期間、證照、請假日、重複），
   不合格的丟棄並列在 `rejected`，絕不寫入髒資料。

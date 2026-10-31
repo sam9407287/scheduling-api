@@ -64,12 +64,17 @@ class ScheduleSerializer(serializers.ModelSerializer):
         """
         version = schedule.schedule_version
         day = schedule.schedule_date
-        ScheduleVersion.objects.filter(
+        grew = ScheduleVersion.objects.filter(
             pk=version.pk, period_start__gt=day
         ).update(period_start=day)
-        ScheduleVersion.objects.filter(
+        grew += ScheduleVersion.objects.filter(
             pk=version.pk, period_end__lt=day
         ).update(period_end=day)
+        if grew:
+            # 2026-10-31：長出來的日子用版本的星期範本補每日班別計畫
+            from .shift_plan import fill_from_template
+            version.refresh_from_db(fields=['shift_plan_template'])
+            fill_from_template(version, day, day)
 
     def create(self, validated_data):
         schedule = super().create(validated_data)

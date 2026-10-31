@@ -22,9 +22,9 @@ SYSTEM_PROMPT_TEMPLATE = """你是排班助手。根據提供的員工、班別�
 
 必須遵守：
 1. 只能使用提供的 employee_id 與 shift_id，日期必須在期間內。
-2. 每個班別每天至少排滿 min_staff 人。若 staffing_requirements 有指定某日期的人數，
-   以該筆為準：min_staff 是最少、max_staff（非 null 時）是最多，不可超過；
-   shift_id 為 null 的那筆是「當日總人數」（不分班別、同一人只算一次）。
+2. staffing_requirements 是這張班表的每日班別計畫：每筆 (date, shift_id) 至少排
+   min_staff 人、max_staff（非 null 時）不可超過。**沒有列在 staffing_requirements
+   裡的日期或班別一律不排**（那天沒開那個班）。
 3. 員工缺少班別要求的證照(required_cert_ids)時，不可排入該班別。
 4. 不可排在員工的請假日(leave_dates)或每週不可排星期(blocked_weekdays, 0=週一)。
    也不可排在機構公休日(org.closed_weekdays, 0=週一)，公休日整天不排任何班。
@@ -109,12 +109,19 @@ def build_context(version, period_start, period_end):
         days.append(day)
         day += timedelta(days=1)
 
-    # 每日人力需求規則（「每天需要幾個人」）：展開成期間內每筆 (日期, 班別/全日)
-    from apps.shifts.staffing import load_staffing_rules, staffing_plan, plan_index
-    plan = staffing_plan(
-        load_staffing_rules(version.organization_id, version.branch_id),
-        period_start, period_end, [s.pk for s in shifts],
-    )
+    # 每日班別計畫（2026-10-31）：這張班表每天開哪些班、各幾人。沒列到的不排。
+    # 版本完全沒有計畫列 → lookups['explicit']=False，view 回 400 shift_plan_required。
+    from apps.shifts.staffing import version_shift_plan, plan_index
+    plan_rows = version_shift_plan(version) or []
+    explicit = bool(plan_rows)
+    lo, hi = period_start.isoformat(), period_end.isoformat()
+    plan = [r for r in plan_rows if lo <= r['date'] <= hi]
+    # 給模型看的只有計畫開到的班別；驗證層仍認得全部啟用班別（丟棄理由才會說
+    # 「計畫沒開」而不是「班別不存在」）。
+    all_shifts = shifts
+    if explicit:
+        planned_shift_ids = {r['shift_id'] for r in plan}
+        shifts = [s for s in shifts if s.pk in planned_shift_ids]
 
     payload = {
         'period': {'start': period_start.isoformat(), 'end': period_end.isoformat(),
@@ -149,7 +156,6 @@ def build_context(version, period_start, period_end):
                 'start': s.start_time.strftime('%H:%M'),
                 'end': s.end_time.strftime('%H:%M'),
                 'hours': float(s.duration_hours),
-                'min_staff': s.min_staff_count,
                 'required_cert_ids': [c.pk for c in s.required_certifications.all()],
                 'priority_employee_ids': [
                     p.employee_id for p in sorted(
@@ -161,7 +167,7 @@ def build_context(version, period_start, period_end):
     }
     lookups = {
         'employees': {e.pk: e for e in employees},
-        'shifts': {s.pk: s for s in shifts},
+        'shifts': {s.pk: s for s in all_shifts},
         'leave_map': leave_map,
         'blocked_weekdays': blocked_weekdays,
         'dates': {d.isoformat() for d in days},
@@ -170,6 +176,7 @@ def build_context(version, period_start, period_end):
         'prefs': prefs,
         'out_of_scope_employees': out_of_scope,
         'staffing': plan_index(plan),
+        'explicit': explicit,
     }
     return payload, lookups
 
@@ -232,6 +239,9 @@ def validate_assignments(raw, lookups, version, allow_multiple_shifts_per_day=Fa
         if (date_str in lookups.get('holidays', set())
                 and lookups.get('prefs', {}).get(emp_id, {}).get('holiday_work') == 'forbid'):
             rejected.append({'row': row, 'reason': '該員工設定不可排國定假日'})
+            continue
+        if lookups.get('explicit') and (date_str, shift_id) not in (lookups.get('staffing') or {}):
+            rejected.append({'row': row, 'reason': f'{date_str} 的每日班別計畫沒有開 {shift.name}'})
             continue
         key = (emp_id, date_str, shift_id)
         if key in seen or key in existing:
@@ -397,6 +407,7 @@ def coverage_warnings(valid_rows, lookups):
         count[(date_str, shift_id)] = count.get((date_str, shift_id), 0) + 1
         day_people.setdefault(date_str, set()).add(emp_id)
     staffing = lookups.get('staffing') or {}
+    explicit = bool(lookups.get('explicit'))
     warnings = []
     closed = lookups.get('closed_weekdays', set())
     for date_str in sorted(lookups['dates']):
@@ -404,6 +415,8 @@ def coverage_warnings(valid_rows, lookups):
             continue  # 公休日本來就不該有人，不算缺口
         for shift in lookups['shifts'].values():
             req = staffing.get((date_str, shift.pk))
+            if explicit and req is None:
+                continue  # 計畫沒開這個班，不是缺口
             need = req['min_staff'] if req else shift.min_staff_count
             got = count.get((date_str, shift.pk), 0)
             if got < need:

@@ -104,7 +104,9 @@ class ShiftTemplateSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'organization', 'organization_name', 'name',
             'start_time', 'end_time', 'break_minutes', 'overlap_minutes',
-            'min_staff_count', 'required_certifications', 'certification_ids',
+            # 2026-10-31：min_staff_count 不再對外（人數改在每張班表的每日班別計畫，
+            # 見 /api/schedules/versions/{id}/shift-plan/）。欄位保留於 DB，前端傳來會被忽略。
+            'required_certifications', 'certification_ids',
             'duration_hours', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'duration_hours', 'created_at', 'updated_at']

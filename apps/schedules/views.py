@@ -152,6 +152,12 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
         # 將無法滿足（這實務上是必要的：B 用了 E1 七天，cap=6，必須由 E2 接手）。
         b_emp_ids = {s.employee_id for s in b_schedules}
         shift_ids = {s.shift_template_id for s in b_schedules}
+        # 2026-10-31 每日班別計畫：有計畫的版本以計畫為唯一人數來源（explicit），
+        # 求解空間也要含計畫裡的班別，否則 A 補不出計畫要求的班。
+        from apps.shifts.staffing import version_shift_plan
+        version_plan = version_shift_plan(b_version)
+        if version_plan:
+            shift_ids |= {r['shift_id'] for r in version_plan}
 
         candidates_qs = (
             Employee.objects
@@ -240,14 +246,18 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
             labor_law_defaults['closed_weekdays'] = (
                 cfg.weekly_closed_days if cfg else []
             )
-        # 每日人力需求規則：派生合規版同樣要守住每天需要的人數
+        # 人數來源：版本每日班別計畫（explicit）> 舊的機構規則/模板人數
         if 'staffing_requirements' not in labor_law_defaults:
-            from apps.shifts.staffing import load_staffing_rules, staffing_plan
-            labor_law_defaults['staffing_requirements'] = staffing_plan(
-                load_staffing_rules(b_version.organization_id, b_version.branch_id),
-                b_version.period_start, b_version.period_end,
-                [sh['id'] for sh in shifts],
-            )
+            if version_plan:
+                labor_law_defaults['staffing_requirements'] = version_plan
+                labor_law_defaults['staffing_mode'] = 'explicit'
+            else:
+                from apps.shifts.staffing import load_staffing_rules, staffing_plan
+                labor_law_defaults['staffing_requirements'] = staffing_plan(
+                    load_staffing_rules(b_version.organization_id, b_version.branch_id),
+                    b_version.period_start, b_version.period_end,
+                    [sh['id'] for sh in shifts],
+                )
         # 國定假日（2026-10-31）：合規版尊重 holiday_work=forbid（硬擋）與
         # prefer/avoid；期間排休配額不套 —— 合規版只守法律最低限度、改動最少。
         if 'holidays' not in labor_law_defaults:
@@ -455,6 +465,83 @@ class ScheduleVersionViewSet(viewsets.ModelViewSet):
                 'ok': sum(1 for c in coverage if c['status'] == 'ok'),
             },
         })
+
+    # ------------------------------------------------------------------
+    # 每日班別計畫（2026-10-31）：這張班表每天開哪些班、各幾人
+    # ------------------------------------------------------------------
+    PLAN_LOCKED = {
+        'code': 'schedule_version_locked',
+        'error': 'Approved schedule versions are read-only.',
+    }
+
+    def _plan_version_or_locked(self):
+        version = self.get_object()
+        if version.status != 'draft':
+            return version, Response(self.PLAN_LOCKED, status=status.HTTP_409_CONFLICT)
+        return version, None
+
+    @action(detail=True, methods=['get', 'put'], url_path='shift-plan')
+    def shift_plan(self, request, pk=None):
+        """
+        GET  → 整張計畫（rows + 星期範本 + summary）
+        PUT  → 整張覆寫 body {"rows": [{date, shift_template, min_staff, max_staff}]}
+        """
+        from . import shift_plan as svc
+        if request.method == 'GET':
+            return Response(svc.plan_payload(self.get_object()))
+        version, locked = self._plan_version_or_locked()
+        if locked:
+            return locked
+        svc.replace_plan(version, request.data.get('rows', []))
+        return Response(svc.plan_payload(version))
+
+    @action(detail=True, methods=['put'], url_path='shift-plan/day')
+    def shift_plan_day(self, request, pk=None):
+        """覆寫某一天：body {"date": "2026-11-03", "shifts": [{shift_template, min_staff, max_staff}]}
+        空的 shifts = 那天不開班。"""
+        from . import shift_plan as svc
+        version, locked = self._plan_version_or_locked()
+        if locked:
+            return locked
+        svc.replace_day(version, request.data.get('date'), request.data.get('shifts', []))
+        return Response(svc.plan_payload(version))
+
+    @action(detail=True, methods=['post'], url_path='shift-plan/apply-template')
+    def shift_plan_apply_template(self, request, pk=None):
+        """星期範本展開：body {"template": {"0": [...], …, "6": [...]},
+        "period_start", "period_end", "overwrite": false}。範本存在版本上，
+        之後期間自動延長時用它補新日子。"""
+        from . import shift_plan as svc
+        version, locked = self._plan_version_or_locked()
+        if locked:
+            return locked
+        body = request.data
+        start = body.get('period_start') or version.period_start
+        end = body.get('period_end') or version.period_end
+        svc.apply_template(version, body.get('template') or {}, start, end,
+                           overwrite=bool(body.get('overwrite', False)))
+        return Response(svc.plan_payload(version))
+
+    @action(detail=True, methods=['post'], url_path='shift-plan/copy-from')
+    def shift_plan_copy_from(self, request, pk=None):
+        """複製另一張班表的範本（沒有範本就從它的計畫列推）到本版本的期間。
+        body {"source_version_id", "period_start"?, "period_end"?, "overwrite"?}"""
+        from . import shift_plan as svc
+        version, locked = self._plan_version_or_locked()
+        if locked:
+            return locked
+        source = self.get_queryset().filter(pk=request.data.get('source_version_id')).first()
+        if source is None:
+            return Response({'error': 'source_version_id not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if source.organization_id != version.organization_id:
+            return Response({'error': 'source version belongs to a different organization'},
+                            status=status.HTTP_403_FORBIDDEN)
+        body = request.data
+        start = body.get('period_start') or version.period_start
+        end = body.get('period_end') or version.period_end
+        svc.copy_from(version, source, start, end, overwrite=bool(body.get('overwrite', False)))
+        return Response(svc.plan_payload(version))
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
