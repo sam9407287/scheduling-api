@@ -71,9 +71,10 @@ class Employee(models.Model):
         related_name='employee_profile',
         verbose_name='使用者帳號'
     )
+    # 2026-11-10：員工編號改為「每個機構內唯一」（原本全系統 unique，
+    # 別的機構用過的編號新機構就不能用）。約束在 Meta.constraints。
     employee_id = models.CharField(
         max_length=50,
-        unique=True,
         verbose_name='員工編號'
     )
     organization = models.ForeignKey(
@@ -176,6 +177,12 @@ class Employee(models.Model):
         verbose_name = '員工'
         verbose_name_plural = '員工'
         ordering = ['employee_id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'employee_id'],
+                name='uniq_employee_id_per_org',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.employee_id} - {self.user.get_full_name() or self.user.username}"

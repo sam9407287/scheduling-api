@@ -160,13 +160,13 @@ GET/PUT/PATCH/DELETE /api/employees/employees/{id}/
 Employee object (key fields):
 ```jsonc
 {
-  "id": 12, "employee_id": "E0042",
+  "id": 12, "employee_id": "E0042",   // 2026-11-10：機構內唯一（不同機構可重複）；同機構重複 → 400 {"employee_id": [...]}
   "user": { "id": 30, "username": "...", "full_name": "王小明" },
   "organization": 1, "branch": 3, "position": "nurse",
   "contract_type": "full_time", "agreed_hours_per_week": "40.00",
   "pay_type": "monthly", "pay_type_display": "月薪制",   // 2026-10-13 新增：monthly | hourly，預設 monthly；影響國定假日加給（§8）
   "certifications": [ { "id": 5, "name": "ACLS", "code": "ACLS" } ],
-  "hire_date": "2024-01-01", "is_active": true,
+  "hire_date": "2024-01-01", "is_active": true,   // 西元年；早於 1950-01-01 → 400（擋民國年誤輸入，2026-11-10）
   // sensitive — only meaningful with active consent (see §2.2)
   "gender": "male", "birth_date": "1990-05-01",
   "height_cm": "178.50", "weight_kg": "72.00",

@@ -1,6 +1,8 @@
 """
 Employee serializers
 """
+import datetime
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
@@ -12,6 +14,9 @@ from apps.accounts.models import Role
 from apps.accounts.serializers import UserSerializer
 
 User = get_user_model()
+
+# 早於這天的到職日一律視為輸入錯誤（多半是把民國年打進西元年欄位）。
+MIN_HIRE_DATE = datetime.date(1950, 1, 1)
 
 
 class EmployeeDataConsentSerializer(serializers.ModelSerializer):
@@ -90,6 +95,17 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+        # 員工編號「機構內唯一」在 validate() 自己檢查（訊息掛在 employee_id 上），
+        # 不用 DRF 自動產生的 UniqueTogetherValidator（訊息落在 non_field_errors）。
+        validators = []
+
+    def validate_hire_date(self, value):
+        # 原生 date input 打民國年（110）會送出西元 0110 年；年資／特休都靠這個日期算。
+        if value < MIN_HIRE_DATE:
+            raise serializers.ValidationError(
+                '到職日年份請輸入西元年（例如 2021），不是民國年。'
+            )
+        return value
 
     def get_scheduling_prefs(self, obj):
         # 唯讀摘要；要改請走 /availability/（rest_day_work_ok / holiday_work）
@@ -137,6 +153,21 @@ class EmployeeSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'branch': 'Branch must belong to the selected organization.'
             })
+
+        employee_code = attrs.get(
+            'employee_id',
+            self.instance.employee_id if self.instance else None,
+        )
+        if organization and employee_code:
+            code_qs = Employee.objects.filter(
+                organization=organization, employee_id=employee_code,
+            )
+            if self.instance:
+                code_qs = code_qs.exclude(pk=self.instance.pk)
+            if code_qs.exists():
+                raise serializers.ValidationError({
+                    'employee_id': '這個員工編號在此機構已經存在。'
+                })
 
         return attrs
 
