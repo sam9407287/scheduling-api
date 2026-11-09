@@ -3,6 +3,9 @@
 This file orients Claude Code (claude.ai/code) sessions to this repository.
 Read this first; for deeper detail follow the links in §11.
 
+**Open work lives in [待辦清單.md](./待辦清單.md)** (repo root) — check it at the
+start of a session and tick items off as they are done.
+
 ## Project at a glance
 
 AI scheduling backend for Taiwan healthcare / long-term-care facilities.
