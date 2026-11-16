@@ -573,6 +573,7 @@ class AIEngineViewSet(viewsets.ViewSet):
             weekly_rest_days = 2
         quota = compute_rest_quota(start, end, [h['date'] for h in calendar], weekly_rest_days)
 
+        from apps.employees.ordering import sort_employees_naturally
         employees_qs = Employee.objects.filter(
             organization=org, is_active=True,
         ).select_related('user', 'availability').order_by('employee_id')
@@ -580,7 +581,8 @@ class AIEngineViewSet(viewsets.ViewSet):
         if branch_id:
             employees_qs = employees_qs.filter(branch_id=branch_id)
         rows = []
-        for emp in employees_qs:
+        # 與員工清單一致：依員工編號自然排序（1, 2, 3, 10…）
+        for emp in sort_employees_naturally(employees_qs):
             info = {'id': emp.id, 'pay_type': emp.pay_type, 'contract_type': emp.contract_type}
             applies = quota_applies(info)
             rows.append({

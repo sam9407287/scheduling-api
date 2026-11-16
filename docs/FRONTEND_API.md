@@ -157,6 +157,12 @@ POST                /api/employees/employees/
 GET/PUT/PATCH/DELETE /api/employees/employees/{id}/
 ```
 
+**List order (2026-11-16):** without `?ordering=`, the list is returned in *natural* order of
+`employee_id` — digit runs compare by value, so `1, 2, 3, 10, 11` (not `1, 10, 11, 2`) and
+`EMP2` before `EMP10`; the order holds across pages. Clients can render rows as received.
+If you sort employees client-side, use `localeCompare(b, 'zh-TW', { numeric: true })` to match.
+An explicit `?ordering=` is applied as a plain database ordering.
+
 Employee object (key fields):
 ```jsonc
 {

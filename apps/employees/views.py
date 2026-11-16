@@ -11,6 +11,7 @@ from .models import (
     Employee, Contract, Certification, EmployeeAvailability,
     EmployeeDataConsent, EmployeeTag,
 )
+from .ordering import sort_employees_naturally
 from .serializers import (
     EmployeeSerializer,
     EmployeeListSerializer,
@@ -131,6 +132,21 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(certifications__id=cert_id)
         
         return queryset.order_by('employee_id')
+
+    def list(self, request, *args, **kwargs):
+        """清單預設依員工編號「自然排序」（1, 2, 3, 10 而不是 1, 10, 11, 2）。
+
+        資料庫的字串排序做不到這件事，所以沒有指定 `?ordering=` 時改在 Python 排好
+        再分頁；一個機構的員工數是幾十到幾百人，整批取出的成本可以接受。
+        有指定 `?ordering=` 就照 OrderingFilter 的結果，不介入。
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        if not request.query_params.get('ordering'):
+            queryset = sort_employees_naturally(queryset)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(queryset, many=True).data)
     
     @action(detail=True, methods=['get'])
     def contracts(self, request, pk=None):
