@@ -95,6 +95,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+        # 機構沒帶時用操作者的機構（見 validate()）；前端表單把機構標成選填。
+        extra_kwargs = {'organization': {'required': False}}
         # 員工編號「機構內唯一」在 validate() 自己檢查（訊息掛在 employee_id 上），
         # 不用 DRF 自動產生的 UniqueTogetherValidator（訊息落在 non_field_errors）。
         validators = []
@@ -140,6 +142,14 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'user': {'username': 'A user with this username already exists.'}})
             if email and email_qs.exists():
                 raise serializers.ValidationError({'user': {'email': 'A user with this email already exists.'}})
+
+        if not self.instance and not attrs.get('organization'):
+            # 新增時沒指定機構 → 用操作者自己的機構（管理者只有一間機構）。
+            request = self.context.get('request')
+            caller_org = getattr(getattr(request, 'user', None), 'organization', None)
+            if caller_org is None:
+                raise serializers.ValidationError({'organization': '請選擇機構。'})
+            attrs['organization'] = caller_org
 
         organization = attrs.get(
             'organization',

@@ -200,7 +200,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         """
         取得或更新員工可用性設定（含所有 time_slots）。
 
-        GET  → 回傳現有設定（若尚未建立回傳 204）
+        GET  → 回傳現有設定（若尚未建立回傳 204，沒有 body）
         PUT  → 完整建立或替換（time_slots 整批替換）
         PATCH → 部分更新（time_slots 若有傳入則整批替換，未傳入則不動）
         """
@@ -210,10 +210,8 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             try:
                 avail = employee.availability
             except EmployeeAvailability.DoesNotExist:
-                return Response(
-                    {'detail': 'No availability config yet. Use PUT to create one.'},
-                    status=status.HTTP_204_NO_CONTENT,
-                )
+                # 204 不能帶 body：帶了會讓 OkHttp 丟 ProtocolException、Vite proxy 回 502。
+                return Response(status=status.HTTP_204_NO_CONTENT)
             return Response(EmployeeAvailabilitySerializer(avail).data)
 
         # PUT / PATCH

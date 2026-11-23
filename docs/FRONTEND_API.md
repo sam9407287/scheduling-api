@@ -168,7 +168,7 @@ Employee object (key fields):
 {
   "id": 12, "employee_id": "E0042",   // 2026-11-10：機構內唯一（不同機構可重複）；同機構重複 → 400 {"employee_id": [...]}
   "user": { "id": 30, "username": "...", "full_name": "王小明" },
-  "organization": 1, "branch": 3, "position": "nurse",
+  "organization": 1, "branch": 3, "position": "nurse",   // POST 可省略 organization → 用操作者的機構（2026-11-23）；操作者沒有機構 → 400 {"organization": [...]}
   "contract_type": "full_time", "agreed_hours_per_week": "40.00",
   "pay_type": "monthly", "pay_type_display": "月薪制",   // 2026-10-13 新增：monthly | hourly，預設 monthly；影響國定假日加給（§8）
   "certifications": [ { "id": 5, "name": "ACLS", "code": "ACLS" } ],
@@ -236,7 +236,7 @@ PUT body
   ]
 }
 // slot_type: blocked (hard) | preferred (soft); day_of_week: 0=Mon..6=Sun, null=every day
-// GET returns 204 when no availability has been created yet
+// GET returns 204 with an empty body when no availability has been created yet
 // GET 多回 "holiday_work_display": "偏好排假日班"（中文標籤）
 ```
 
