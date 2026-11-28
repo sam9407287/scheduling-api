@@ -9,7 +9,10 @@ from django.utils import timezone
 from decimal import Decimal
 from .models import Attendance, AnomalyRecord
 from .serializers import AttendanceSerializer, AnomalyRecordSerializer
-from apps.accounts.permissions import IsEmployeeOrAbove, IsSupervisor
+from rest_framework.exceptions import ValidationError
+from apps.accounts.permissions import (
+    IsEmployeeOrAbove, IsSupervisor, is_supervisor_or_above, scope_to_user_org,
+)
 from apps.employees.models import Employee
 
 
@@ -23,15 +26,13 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """`employee_id` 省略時視為本人打卡；主管替人登記時必須是同機構員工。"""
-        from rest_framework.exceptions import ValidationError
         user = self.request.user
         employee = serializer.validated_data.get('employee')
         if employee is None:
             employee = getattr(user, 'employee_profile', None)
             if employee is None:
                 raise ValidationError({'employee_id': '此帳號沒有員工檔案，請指定 employee_id。'})
-        if not user.is_superuser and employee.organization_id != user.organization_id:
-            raise ValidationError({'employee_id': '只能登記自己機構的員工。'})
+        self._check_same_org(serializer.validated_data, employee=employee)
         work_date = serializer.validated_data.get('work_date')
         if Attendance.objects.filter(employee=employee, work_date=work_date).exists():
             raise ValidationError({'work_date': '該員工當日已有出勤紀錄。'})
@@ -40,8 +41,28 @@ class AttendanceViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         """主管修改上下班時間後，工時與異常由後端重算（不信任前端送來的計算欄位）。"""
+        self._check_same_org(serializer.validated_data)
         attendance = serializer.save()
         self._recompute(attendance)
+
+    def _check_same_org(self, data, employee=None):
+        """寫入時引用的員工／代班對象／支援分店都必須屬於操作者的機構。"""
+        user = self.request.user
+        if user.is_superuser:
+            return
+        refs = {
+            'employee_id': employee or data.get('employee'),
+            'substitute_for': data.get('substitute_for'),
+            'cross_branch': data.get('cross_branch'),
+        }
+        messages = {
+            'employee_id': '只能登記自己機構的員工。',
+            'substitute_for': '代班對象必須是自己機構的員工。',
+            'cross_branch': '支援分店必須是自己機構的分店。',
+        }
+        for field, obj in refs.items():
+            if obj is not None and obj.organization_id != user.organization_id:
+                raise ValidationError({field: messages[field]})
 
     def _recompute(self, attendance):
         """clock_in / clock_out 齊全時重算 actual_hours 並重跑異常檢查。
@@ -56,11 +77,12 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         attendance.save(update_fields=['anomaly_flag', 'anomaly_reason'])
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        
+        # 資料隔離：非超級使用者只看得到自己機構的出勤
+        queryset = scope_to_user_org(
+            super().get_queryset(), self.request.user, 'employee__organization')
+
         # 員工只能看自己的出勤
-        if not (self.request.user.is_superuser or 
-                (self.request.user.role and self.request.user.role.name in ['admin', 'manager', 'supervisor'])):
+        if not is_supervisor_or_above(self.request.user):
             try:
                 employee = self.request.user.employee_profile
                 queryset = queryset.filter(employee=employee)
@@ -259,8 +281,10 @@ class AnomalyRecordViewSet(viewsets.ModelViewSet):
     ordering_fields = ['-created_at', 'severity']
     
     def get_queryset(self):
-        queryset = super().get_queryset()
-        
+        # 資料隔離：非超級使用者只看得到自己機構的異常紀錄
+        queryset = scope_to_user_org(
+            super().get_queryset(), self.request.user, 'attendance__employee__organization')
+
         # Filter by resolved
         resolved = self.request.query_params.get('resolved')
         if resolved is not None:
@@ -272,7 +296,23 @@ class AnomalyRecordViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(severity=severity)
         
         return queryset
-    
+
+    def _check_attendance_org(self, serializer):
+        """異常紀錄只能掛在自己機構的出勤上（建立或改掛都要檢查）。"""
+        user = self.request.user
+        attendance = serializer.validated_data.get('attendance')
+        if (attendance is not None and not user.is_superuser
+                and attendance.employee.organization_id != user.organization_id):
+            raise ValidationError({'attendance': '只能處理自己機構的出勤紀錄。'})
+
+    def perform_create(self, serializer):
+        self._check_attendance_org(serializer)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._check_attendance_org(serializer)
+        serializer.save()
+
     @action(detail=True, methods=['post'])
     def resolve(self, request, pk=None):
         """處理異常"""

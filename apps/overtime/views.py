@@ -5,12 +5,13 @@ from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum
+from rest_framework.exceptions import ValidationError
+from django.db import transaction
 from .models import OvertimeRecord, OvertimeRule
 from .serializers import (
     OvertimeRecordSerializer, OvertimeRecordAdjustSerializer, OvertimeRuleSerializer,
 )
-from apps.accounts.permissions import IsManager, IsSupervisor
+from apps.accounts.permissions import IsManager, is_supervisor_or_above, scope_to_user_org
 from apps.attendance.models import Attendance
 
 
@@ -21,6 +22,25 @@ class OvertimeRuleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsManager]
     search_fields = ['organization__name']
     ordering_fields = ['organization', 'overtime_type']
+
+    def get_queryset(self):
+        # 資料隔離：非超級使用者只看得到、改得到自己機構的規則
+        return scope_to_user_org(super().get_queryset(), self.request.user)
+
+    def _check_org(self, serializer):
+        user = self.request.user
+        organization = serializer.validated_data.get('organization')
+        if (organization is not None and not user.is_superuser
+                and organization.pk != user.organization_id):
+            raise ValidationError({'organization': '只能設定自己機構的加班規則。'})
+
+    def perform_create(self, serializer):
+        self._check_org(serializer)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._check_org(serializer)
+        serializer.save()
 
 
 class OvertimeRecordViewSet(mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet):
@@ -51,15 +71,12 @@ class OvertimeRecordViewSet(mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewS
         return Response(OvertimeRecordSerializer(record).data)
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-
         # 資料隔離：非超級使用者只看得到自己機構的紀錄
-        if not self.request.user.is_superuser:
-            queryset = queryset.filter(employee__organization=self.request.user.organization)
+        queryset = scope_to_user_org(
+            super().get_queryset(), self.request.user, 'employee__organization')
 
         # 員工只能看自己的加班紀錄
-        if not (self.request.user.is_superuser or
-                (self.request.user.role and self.request.user.role.name in ['admin', 'manager', 'supervisor'])):
+        if not is_supervisor_or_above(self.request.user):
             try:
                 employee = self.request.user.employee_profile
                 queryset = queryset.filter(employee=employee)
@@ -83,28 +100,45 @@ class OvertimeRecordViewSet(mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewS
     
     @action(detail=False, methods=['post'])
     def calculate(self, request):
-        """計算出勤記錄的加班時數"""
+        """計算出勤記錄的加班時數。
+
+        只能算自己機構的出勤（員工角色只能算自己的）；看不到的出勤一律 404。
+        同一筆出勤已有加班紀錄時不重複產生，直接回既有紀錄（200）——管理者
+        手動調過的倍率／備註因此不會被覆蓋。
+        """
         attendance_id = request.data.get('attendance_id')
         if not attendance_id:
             return Response(
                 {'error': 'attendance_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        try:
-            attendance = Attendance.objects.get(id=attendance_id)
-        except Attendance.DoesNotExist:
-            return Response(
-                {'error': 'Attendance not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # 計算加班
-        overtime_records = self._calculate_overtime(attendance)
-        
+
+        user = request.user
+        visible = scope_to_user_org(Attendance.objects.all(), user, 'employee__organization')
+        if not is_supervisor_or_above(user):
+            visible = visible.filter(employee__user=user)
+
+        with transaction.atomic():
+            # 鎖住出勤列，兩個同時進來的請求不會各自產生一份
+            try:
+                attendance = visible.select_for_update().filter(pk=attendance_id).first()
+            except (TypeError, ValueError):
+                attendance = None
+            if attendance is None:
+                return Response(
+                    {'error': 'Attendance not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            existing = list(self.queryset.filter(attendance=attendance))
+            if existing:
+                return Response(OvertimeRecordSerializer(existing, many=True).data)
+
+            overtime_records = self._calculate_overtime(attendance)
+
         serializer = OvertimeRecordSerializer(overtime_records, many=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
-    
+
     def _holiday_record(self, attendance: Attendance) -> OvertimeRecord:
         """國定假日出勤的加給紀錄，依員工薪制分流（PM 2026-10-13 補充）。
 

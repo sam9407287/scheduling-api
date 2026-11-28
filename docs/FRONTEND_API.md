@@ -942,6 +942,19 @@ GET/POST  /api/overtime/rules/
 Standard DRF CRUD; shapes follow the models (`/api/schema/` has the full
 field list).
 
+**機構隔離（2026-11-28）**：這一節所有端點都只回、只接受操作者自己機構的資料
+（superuser 除外；還沒有機構的帳號拿到空清單）。別的機構的 id 一律 `404`；
+寫入時引用別機構的員工／出勤／分店／機構（`employee_id`、`substitute_for`、
+`cross_branch`、異常的 `attendance`、規則的 `organization`）回 `400`，錯誤掛在該欄位上。
+
+**`POST /api/overtime/records/calculate/` 不再重複產生（2026-11-28）**：
+
+| 情況 | 狀態碼 | body |
+|---|---|---|
+| 這筆出勤第一次計算 | `201` | 新產生的紀錄陣列（沒有超時則 `[]`） |
+| 這筆出勤已有加班紀錄 | `200` | **既有**紀錄陣列，不新增、不覆蓋手動調過的倍率／備註 |
+| 出勤不存在、屬於別的機構、或員工角色算別人的 | `404` | `{ "error": "Attendance not found" }` |
+
 ### 國定假日出勤加給依薪制分流（2026-10-13，PM 補充）
 
 `POST /api/overtime/records/calculate/ { "attendance_id": 7 }` 遇到出勤日是機構

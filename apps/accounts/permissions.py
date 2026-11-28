@@ -3,6 +3,29 @@ Custom permissions for scheduling system
 """
 from rest_framework import permissions
 
+SUPERVISOR_ROLES = ('admin', 'manager', 'supervisor')
+
+
+def is_supervisor_or_above(user) -> bool:
+    """Superuser, or a role that manages other people's records."""
+    if user.is_superuser:
+        return True
+    return bool(user.role and user.role.name in SUPERVISOR_ROLES)
+
+
+def scope_to_user_org(queryset, user, lookup='organization'):
+    """Data isolation: narrow `queryset` to the caller's organization.
+
+    `lookup` is the path from the queryset's model to the organization
+    (e.g. ``employee__organization``). Superusers see everything; an account
+    with no organization sees nothing (never "no filter").
+    """
+    if user.is_superuser:
+        return queryset
+    if not user.organization_id:
+        return queryset.none()
+    return queryset.filter(**{f'{lookup}_id': user.organization_id})
+
 
 class IsAdmin(permissions.BasePermission):
     """Only admin users can access"""
